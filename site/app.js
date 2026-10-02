@@ -259,6 +259,14 @@ function canManageBoard(board) {
   return sameName(board.owner || '', state.session.name) || (Boolean(state.admin) && board.visibility === 'public');
 }
 
+// Only the person who made a board can delete it; the admin can rename
+// someone else's public board but not delete it. (The boards from before
+// boards were issues belong to the admin.)
+function canDeleteBoard(board) {
+  if (!board || !state.session || board.personal) return false;
+  return sameName(board.owner || '', state.session.name);
+}
+
 // Boards come from two places: board issues, and the older tabs.json (read
 // only; a board issue with the same id overrides its entry, including a
 // "deleted" one). The owner of an old board is the admin.
@@ -897,6 +905,7 @@ function renderBoard() {
   $('new-idea').disabled = !tab;
   for (const button of document.querySelectorAll('.mode')) button.disabled = !tab;
   $('board-tools').hidden = !canManageBoard(tab);
+  $('delete-board').hidden = !canDeleteBoard(tab);
 
   // Never rebuild the board under someone's finger; catch up when they let go.
   if (state.drag) {
@@ -2715,7 +2724,10 @@ async function saveBoard(event) {
 // the issues can still be reopened on GitHub).
 async function deleteBoard() {
   const board = currentTab();
-  if (!canManageBoard(board)) return;
+  if (!canDeleteBoard(board)) {
+    if (board) toast(`Only ${board.owner || 'the person who made it'} can delete ${board.name}.`, true);
+    return;
+  }
   const contents = state.items.filter((item) => item.kind !== 'board' && item.tab === board.id);
   const ok = await confirmAction({
     title: `Delete ${board.name}?`,
