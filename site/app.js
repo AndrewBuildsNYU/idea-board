@@ -8,6 +8,7 @@
 import { open as openVault } from './vault.js';
 import { Store, COLORS, GROUP_COLORS, PENS, STRING_COLORS } from './store.js';
 import { renderView, buildNotesPdf } from './exporter.js';
+import { Live } from './live.js';
 
 const KEYS = {
   session: 'idea-board:session',
@@ -18,7 +19,12 @@ const KEYS = {
   pen: 'idea-board:pen',
   string: 'idea-board:string',
 };
-const POLL = { items: 15000, tabs: 60000, comments: 10000 };
+// GitHub is still checked as the record: every 30 s while live updates are
+// flowing, every 5 s when they aren't. Everyone shares one GitHub key and
+// its hourly request limit, so with many people on the board the slow
+// check matters; the relay carries the changes in between.
+const POLL = { live: 30000, fallback: 5000, tabs: 60000, comments: 10000 };
+const PRESENCE = { every: 20000, expire: 50000 };
 
 // Every tab's board is this big, in board pixels, and nothing can leave it.
 const BOARD = { width: 3200, height: 2000 };
@@ -85,6 +91,16 @@ const state = {
   lastTap: null,
   menuSpot: null,
   moves: new Map(), // item number -> { spot, timer, saving }
+  live: null,
+  liveStatus: 'off',
+  lastPoll: 0,
+  reconcileTimer: null,
+  peers: new Map(), // sender id -> { name, tab, at }
+  remoteMoves: new Map(), // item number -> { x, y, at, seq, from }
+  remoteInk: new Map(), // stroke id -> { tab, color, width, points, line, at }
+  outgoingMoves: new Map(),
+  outgoingTimer: null,
+  sendSeq: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -239,10 +255,15 @@ function upsertLocal(item) {
 // jumps back while it's being saved.
 function withLocal(items) {
   let out = items;
-  if (state.moves.size) {
+  const now = Date.now();
+  for (const [number, move] of state.remoteMoves) if (now - move.at > 15000) state.remoteMoves.delete(number);
+  if (state.moves.size || state.remoteMoves.size) {
     out = out.map((item) => {
+      // Our own unsaved move wins; then one somebody else is making right now.
       const move = state.moves.get(item.number);
-      return move ? { ...item, x: move.spot.x, y: move.spot.y } : item;
+      if (move) return { ...item, x: move.spot.x, y: move.spot.y };
+      const remote = state.remoteMoves.get(item.number);
+      return remote ? { ...item, x: remote.x, y: remote.y } : item;
     });
   }
   const draft = state.draft;
@@ -362,6 +383,7 @@ async function signIn(event) {
 
 function signOut() {
   if (state.mode !== 'move') setMode('move');
+  stopLive();
   stopPolling();
   closeDialogs();
   writeStorage('sessionStorage', KEYS.session, null);
@@ -386,6 +408,7 @@ async function startBoard(session) {
   setRail(readStorage('localStorage', KEYS.rail) === 'collapsed');
   setMode('move');
   renderAll();
+  startLive();
   await Promise.all([refreshTabs(), refreshItems()]);
   state.loaded = true;
   chooseTab(initialTab());
@@ -403,6 +426,7 @@ function initialTab() {
 
 function chooseTab(id) {
   if (id !== state.current && state.mode !== 'move') setMode('move');
+  const changed = id !== state.current;
   state.current = id;
   if (id) {
     history.replaceState(null, '', `#${id}`);
@@ -410,6 +434,8 @@ function chooseTab(id) {
   }
   renderAll();
   restoreView();
+  if (changed) sayHello(false);
+  renderPresence();
 }
 
 async function refreshTabs() {
@@ -438,6 +464,7 @@ async function refreshTabs() {
 async function refreshItems() {
   if (state.busy.items || !state.store) return;
   state.busy.items = true;
+  state.lastPoll = Date.now();
   try {
     const items = await state.store.listItems();
     if (items !== state.serverItems) {
@@ -462,13 +489,268 @@ function showBanner(error) {
 
 function startPolling() {
   stopPolling();
-  state.timers.push(setInterval(() => { if (!document.hidden) refreshItems(); }, POLL.items));
+  state.timers.push(setInterval(() => {
+    if (document.hidden) return;
+    const every = state.liveStatus === 'live' ? POLL.live : POLL.fallback;
+    if (Date.now() - state.lastPoll >= every - 250) refreshItems();
+  }, POLL.fallback));
   state.timers.push(setInterval(() => { if (!document.hidden) refreshTabs(); }, POLL.tabs));
 }
 
 function stopPolling() {
   state.timers.forEach(clearInterval);
   state.timers = [];
+}
+
+// ---------------------------------------------------------------- live updates
+
+function startLive() {
+  stopLive();
+  const { member } = state.session;
+  state.store.onChange = (number, item) => announce({ t: 'item', number, item });
+  state.store.onComment = (number, id, comment) => announce({ t: 'comment', number, id, comment });
+  state.live = new Live({
+    secret: `${member.repo}|${member.token}`,
+    onMessage: onLive,
+    onStatus: setLiveStatus,
+  });
+  state.live.start().catch(() => setLiveStatus('offline'));
+  state.liveTimers = [
+    setInterval(() => sayHello(false), PRESENCE.every),
+    setInterval(() => {
+      renderPresence();
+      drawRemoteInk();
+    }, 10000),
+  ];
+}
+
+function stopLive() {
+  (state.liveTimers || []).forEach(clearInterval);
+  state.liveTimers = [];
+  if (state.live) {
+    state.live.send({ t: 'bye' });
+    const live = state.live;
+    setTimeout(() => live.stop(), 300);
+  }
+  state.live = null;
+  state.peers.clear();
+  state.remoteInk.clear();
+  state.remoteMoves.clear();
+  setLiveStatus('off');
+}
+
+function announce(message) {
+  if (!state.live) return;
+  state.live.send(message).then((sent) => {
+    // Too big to relay (a very large drawing): ask everyone to fetch it instead.
+    if (!sent && message.t === 'item' && state.liveStatus === 'live') state.live.send({ t: 'refresh' });
+  });
+}
+
+function setLiveStatus(status) {
+  const was = state.liveStatus;
+  state.liveStatus = status;
+  if (status === 'live' && was !== 'live') {
+    // Ask who's here, and catch up on anything missed while disconnected.
+    sayHello(true);
+    if (state.loaded) refreshItems();
+  }
+  renderPresence();
+}
+
+function sayHello(ask) {
+  if (state.live && state.session) announce({ t: 'hello', name: state.session.name, tab: state.current, ask });
+}
+
+// After somebody else's change, check GitHub a little later: it confirms the
+// change and picks up anything a relay message can't carry (comment counts).
+function reconcileSoon(delay = 6000) {
+  clearTimeout(state.reconcileTimer);
+  state.reconcileTimer = setTimeout(() => {
+    refreshItems();
+    if (state.detail != null) loadComments();
+  }, delay);
+}
+
+function applyStoreView() {
+  state.serverItems = state.store.view();
+  setItems(withLocal(state.serverItems));
+  renderAll();
+  if (state.detail != null) renderDetail();
+}
+
+function elementFor(number) {
+  return document.querySelector(`#notes [data-number="${number}"], #texts [data-number="${number}"]`);
+}
+
+function onLive(message) {
+  if (!state.session) return;
+  const from = message.from;
+  if (from) {
+    const peer = state.peers.get(from);
+    if (peer) peer.at = Date.now();
+  }
+  switch (message.t) {
+    case 'item': {
+      if (!Number.isInteger(message.number)) return;
+      if (state.store.applyRemote(message.number, message.item || null)) {
+        // If someone is dragging this right now, their live position wins over
+        // a save that was already on its way (an earlier drop of the same note).
+        const move = state.remoteMoves.get(message.number);
+        if (!move || Date.now() - move.at > 1500) state.remoteMoves.delete(message.number);
+        applyStoreView();
+      }
+      break;
+    }
+    case 'move': {
+      for (const { number, x, y, seq } of message.moves || []) {
+        if (state.drag && (state.drag.number === number || (state.drag.members || []).some((m) => m.number === number))) continue;
+        const last = state.remoteMoves.get(number);
+        if (last && last.from === from && last.seq > seq) continue;
+        state.remoteMoves.set(number, { x, y, seq, from, at: Date.now() });
+        patchLocal(number, { x, y });
+        const el = elementFor(number);
+        if (el) {
+          el.style.left = `${x}px`;
+          el.style.top = `${y}px`;
+        }
+      }
+      redrawOverlays();
+      break;
+    }
+    case 'ink': {
+      const ink = state.remoteInk.get(message.id) || { tab: message.tab, color: message.color, width: message.width, points: [] };
+      const start = Math.min(message.start || 0, ink.points.length);
+      ink.points = ink.points.slice(0, start).concat(message.points || []);
+      ink.at = Date.now();
+      state.remoteInk.set(message.id, ink);
+      drawRemoteInk();
+      break;
+    }
+    case 'ink-done': {
+      const ink = state.remoteInk.get(message.id) || { tab: message.tab, color: message.color, width: message.width, points: [] };
+      // Kept on screen until the drawing it belongs to arrives.
+      ink.line = message.line;
+      if (message.line) ink.points = message.line.split('|')[2].split(' ').map((pair) => {
+        const [x, y] = pair.split(',');
+        return { x: Number(x), y: Number(y) };
+      });
+      ink.at = Date.now();
+      state.remoteInk.set(message.id, ink);
+      drawRemoteInk();
+      break;
+    }
+    case 'ink-cancel':
+      state.remoteInk.delete(message.id);
+      drawRemoteInk();
+      break;
+    case 'tabs': {
+      if (!Array.isArray(message.tabs)) return;
+      state.store.acceptTabs(message.tabs, message.sha);
+      if (state.admin) state.admin.acceptTabs(message.tabs, message.sha);
+      state.tabs = state.store.tabCache.value.tabs;
+      if (!state.tabs.some((tab) => tab.id === state.current)) chooseTab(state.tabs.length ? state.tabs[0].id : null);
+      else renderAll();
+      break;
+    }
+    case 'comment': {
+      state.store.rememberComment(message.number, message.id, message.comment || null, { quiet: true });
+      if (state.detail === message.number) {
+        const list = state.store.cachedComments(message.number);
+        if (list) {
+          state.comments = list;
+          state.commentsLoaded = true;
+          renderComments();
+        }
+      }
+      // The note's comment count comes from GitHub; pick it up shortly.
+      reconcileSoon(10000);
+      break;
+    }
+    case 'refresh':
+      reconcileSoon(1500);
+      break;
+    case 'hello':
+      if (!from) return;
+      state.peers.set(from, { name: String(message.name || 'Someone').slice(0, 40), tab: message.tab, at: Date.now() });
+      // Answer a newcomer, a little later than everybody else might.
+      if (message.ask) setTimeout(() => sayHello(false), 200 + Math.random() * 1200);
+      renderPresence();
+      break;
+    case 'bye':
+      state.peers.delete(from);
+      renderPresence();
+      break;
+    default:
+      break;
+  }
+}
+
+// Positions of things being dragged go out ~20 times a second, newest only.
+function liveMoves(list) {
+  if (!state.live || state.liveStatus !== 'live') return;
+  for (const { number, x, y } of list) state.outgoingMoves.set(number, { number, x, y });
+  if (state.outgoingTimer) return;
+  state.outgoingTimer = setTimeout(() => {
+    state.outgoingTimer = null;
+    const moves = [...state.outgoingMoves.values()].map((move) => ({ ...move, seq: ++state.sendSeq }));
+    state.outgoingMoves.clear();
+    if (moves.length) announce({ t: 'move', moves });
+  }, 50);
+}
+
+function drawRemoteInk() {
+  const now = Date.now();
+  const paths = [];
+  for (const [id, ink] of state.remoteInk) {
+    const settled = ink.line && state.sketches.some((sketch) => sketch.strokes.includes(ink.line));
+    if (settled || now - ink.at > 20000) {
+      state.remoteInk.delete(id);
+      continue;
+    }
+    if (ink.tab !== state.current || !ink.points.length) continue;
+    paths.push(svg('path', { d: strokePath(ink.points), class: `ink-stroke pen--${ink.color}`, 'stroke-width': ink.width }));
+  }
+  $('ink-remote').replaceChildren(...paths);
+}
+
+function renderPresence() {
+  const status = $('live-status');
+  const labels = {
+    live: ['Live', 'Changes appear for everyone as they happen.'],
+    connecting: ['Connecting', 'Connecting for live updates.'],
+    offline: ['Catching up', 'Live updates are unavailable right now, so the board checks for changes every few seconds.'],
+    off: ['', ''],
+  };
+  const [label, title] = labels[state.liveStatus] || labels.off;
+  status.className = `live-status live-status--${state.liveStatus}`;
+  status.title = title;
+  $('live-label').textContent = label;
+  const now = Date.now();
+  for (const [id, peer] of state.peers) if (now - peer.at > PRESENCE.expire) state.peers.delete(id);
+  // One chip per person, however many tabs they have open.
+  const people = new Map();
+  for (const peer of state.peers.values()) {
+    // Your own other windows aren't "somebody else".
+    if (state.session && sameName(peer.name, state.session.name)) continue;
+    const key = peer.name.toLowerCase();
+    if (!people.has(key) || people.get(key).tab !== state.current) people.set(key, peer);
+  }
+  const everyone = [...people.values()].sort((a, b) => (b.tab === state.current) - (a.tab === state.current));
+  const chips = everyone.slice(0, 6).map((peer) => {
+    const tab = state.tabs.find((item) => item.id === peer.tab);
+    const here = peer.tab === state.current;
+    return h('span', {
+      class: `peer${here ? '' : ' peer--elsewhere'}`,
+      style: `--peer: hsl(${[...peer.name].reduce((sum, c) => sum + c.charCodeAt(0), 0) * 47 % 360} 55% 45%)`,
+      title: `${peer.name}${tab ? ` is on ${tab.name}` : ''}`,
+    }, peer.name.charAt(0).toUpperCase());
+  });
+  if (everyone.length > 6) {
+    chips.push(h('span', { class: 'peer peer--more', title: everyone.slice(6).map((peer) => peer.name).join(', ') }, `+${everyone.length - 6}`));
+  }
+  $('peers').replaceChildren(...chips);
+  $('peers').setAttribute('aria-label', people.size ? `Also here: ${[...people.values()].map((p) => p.name).join(', ')}` : 'Nobody else here right now');
 }
 
 // ---------------------------------------------------------------- rendering
@@ -820,6 +1102,7 @@ function drawInk() {
     }
   }
   $('ink-strokes').replaceChildren(...paths);
+  drawRemoteInk();
 }
 
 function toWorld(clientX, clientY) {
@@ -900,7 +1183,15 @@ function startStroke(event) {
   }
   const color = state.pen.color;
   const width = PEN_WIDTHS[state.pen.size];
-  state.liveStroke = { pointerId: event.pointerId, points: [point], color, width };
+  state.liveStroke = {
+    pointerId: event.pointerId,
+    points: [point],
+    color,
+    width,
+    id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    sent: 0,
+    sentAt: 0,
+  };
   const live = $('ink-live');
   live.setAttribute('class', `ink-stroke pen--${color}`);
   live.setAttribute('stroke-width', width);
@@ -915,19 +1206,33 @@ function extendStroke(event) {
   if (Math.hypot(point.x - last.x, point.y - last.y) < 1.5) return;
   stroke.points.push(point);
   $('ink-live').setAttribute('d', strokePath(stroke.points));
+  // Everyone else watches the line being drawn: new points, ~15 times a second.
+  if (Date.now() - stroke.sentAt > 66) sendInk(stroke);
+}
+
+function sendInk(stroke) {
+  if (!state.live || state.liveStatus !== 'live' || stroke.sent >= stroke.points.length) return;
+  const points = stroke.points.slice(stroke.sent).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+  announce({ t: 'ink', id: stroke.id, tab: state.current, color: stroke.color, width: stroke.width, start: stroke.sent, points });
+  stroke.sent = stroke.points.length;
+  stroke.sentAt = Date.now();
 }
 
 function cancelStroke() {
+  const stroke = state.liveStroke;
   state.liveStroke = null;
   $('ink-live').setAttribute('hidden', '');
+  if (stroke && stroke.sent) announce({ t: 'ink-cancel', id: stroke.id });
 }
 
 function finishStroke() {
   const stroke = state.liveStroke;
-  cancelStroke();
+  state.liveStroke = null;
+  $('ink-live').setAttribute('hidden', '');
   if (!stroke) return;
   const points = simplify(stroke.points, 0.8).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
   const line = `${stroke.color}|${stroke.width}|${points.map((p) => `${p.x},${p.y}`).join(' ')}`;
+  announce({ t: 'ink-done', id: stroke.id, tab: state.current, color: stroke.color, width: stroke.width, line });
   addStroke(line);
 }
 
@@ -1099,6 +1404,7 @@ function moveItemDrag(event) {
   drag.el.style.left = `${drag.spot.x}px`;
   drag.el.style.top = `${drag.spot.y}px`;
   redrawOverlays();
+  liveMoves([{ number: drag.number, ...drag.spot }]);
 }
 
 function endItemDrag(event) {
@@ -1138,6 +1444,7 @@ function nudge(event, number, el) {
   el.style.top = `${spot.y}px`;
   queueMove(number, spot);
   redrawOverlays();
+  liveMoves([{ number, ...spot }]);
   revealElement(el);
 }
 
@@ -1513,6 +1820,7 @@ function moveGroupDrag(event) {
     member.el.style.top = `${member.y + drag.dy}px`;
   }
   redrawOverlays();
+  liveMoves(drag.members.map((member) => ({ number: member.number, x: member.x + drag.dx, y: member.y + drag.dy })));
 }
 
 function endGroupDrag(event) {
@@ -1780,17 +2088,30 @@ function restoreView() {
   }
 }
 
-// The spot at the middle of the screen, where a new note should appear.
+// Where a new note should appear: the free spot nearest the middle of the
+// screen. The search spirals out from a random angle, so several people
+// posting at the same moment (who can't yet see each other's notes) spread
+// out instead of landing in one pile.
 function centreSpot() {
   const rect = viewportRect();
   const { zoom, x, y } = state.view;
-  const jitter = () => (Math.random() - 0.5) * 60;
-  return clampBox(
-    (rect.width / 2 - x) / zoom - NOTE.width / 2 + jitter(),
-    (rect.height / 2 - y) / zoom - NOTE.height / 2 + jitter(),
-    NOTE.width,
-    NOTE.height,
-  );
+  const cx = (rect.width / 2 - x) / zoom - NOTE.width / 2;
+  const cy = (rect.height / 2 - y) / zoom - NOTE.height / 2;
+  const taken = [...state.spots.values()];
+  // Each person heads off in their own direction (from their name), so two
+  // people posting in the same instant land apart.
+  const own = [...state.session.name.toLowerCase()].reduce((sum, c) => (sum * 31 + c.charCodeAt(0)) % 3600, 7) / 3600;
+  const turn = own * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+  for (let ring = 0; ring < 14; ring++) {
+    const steps = ring === 0 ? 1 : ring * 8;
+    for (let k = 0; k < steps; k++) {
+      const angle = turn + (k / steps) * Math.PI * 2;
+      const reach = ring === 0 ? 170 : 170 + ring * 80;
+      const spot = clampBox(cx + Math.cos(angle) * reach, cy + Math.sin(angle) * reach * 0.8, NOTE.width, NOTE.height);
+      if (!taken.some((other) => overlaps(other, spot))) return spot;
+    }
+  }
+  return clampBox(cx + (Math.random() - 0.5) * 120, cy + (Math.random() - 0.5) * 120, NOTE.width, NOTE.height);
 }
 
 function revealElement(el) {
@@ -2228,6 +2549,8 @@ async function changeTabs(message, mutate) {
     try {
       const saved = await state.admin.saveTabs(next, sha, message);
       state.tabs = saved.tabs;
+      state.store.acceptTabs(saved.tabs, saved.sha);
+      announce({ t: 'tabs', tabs: saved.tabs, sha: saved.sha });
       return;
     } catch (error) {
       if (attempt === 0 && (error.status === 409 || error.status === 422)) continue;

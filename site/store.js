@@ -217,15 +217,44 @@ export class Store {
     this.version = 0;
   }
 
-  remember(number, item) {
+  // Every confirmed write passes through here, so `onChange` (set by the app
+  // to tell everyone else) hears about all of them. `quiet` is for changes
+  // that came from somebody else, which mustn't be echoed back.
+  remember(number, item, { quiet = false } = {}) {
     this.pendingItems.set(number, { item, at: Date.now() });
     this.version++;
+    if (!quiet && this.onChange) this.onChange(number, item);
   }
 
-  rememberComment(number, id, comment) {
+  rememberComment(number, id, comment, { quiet = false } = {}) {
     if (!this.pendingComments.has(number)) this.pendingComments.set(number, new Map());
     this.pendingComments.get(number).set(id, { comment, at: Date.now() });
     this.version++;
+    if (!quiet && this.onComment) this.onComment(number, id, comment);
+  }
+
+  // Somebody else's write, relayed live. It's held like one of ours until
+  // GitHub shows it, unless what we already have is newer.
+  applyRemote(number, item) {
+    const pending = this.pendingItems.get(number);
+    const known = pending ? pending.item : this.itemCache.items.find((other) => other.number === number);
+    if (item && known && known.updated > item.updated) return false;
+    this.remember(number, item, { quiet: true });
+    return true;
+  }
+
+  // Tabs the admin just saved, relayed live: shown now, and older copies
+  // GitHub may still be serving are ignored for a while.
+  acceptTabs(tabs, sha) {
+    this.tabCache = { etag: null, value: { tabs, sha } };
+    this.lastTabWrite = { sha, at: Date.now() };
+    return this.tabCache.value;
+  }
+
+  // What listComments would return from what we already have, without asking
+  // GitHub; null when this thread has never been loaded.
+  cachedComments(number) {
+    return this.commentCache.has(number) ? this.commentsView(number) : null;
   }
 
   async request(method, path, { body, etag } = {}) {
@@ -281,6 +310,11 @@ export class Store {
     if (raw !== this.itemCache.raw) {
       this.itemCache = { raw, items: raw.filter((issue) => !issue.pull_request).map(toItem) };
     }
+    return this.view();
+  }
+
+  // The server's list with our pending writes (and relayed ones) laid over it.
+  view() {
     const server = this.itemCache.items;
     const now = Date.now();
     for (const [number, entry] of this.pendingItems) {
@@ -325,7 +359,11 @@ export class Store {
   patchItem(number, change) {
     const run = async () => {
       const { data } = await this.request('GET', `/repos/${this.repo}/issues/${number}`);
-      const item = toItem(data);
+      const fetched = toItem(data);
+      // With several people editing, a change relayed live can be newer than
+      // what GitHub hands back; build on whichever is newer.
+      const known = this.pendingItems.get(number);
+      const item = known && known.item && known.item.updated > fetched.updated ? known.item : fetched;
       const changes = typeof change === 'function' ? change(item) : change;
       return changes ? this.updateItem(item, changes) : item;
     };
@@ -395,11 +433,15 @@ export class Store {
 
   async listComments(number) {
     const raw = await this.listAll(`/repos/${this.repo}/issues/${number}/comments?per_page=100`);
-    let cached = this.commentCache.get(number);
+    const cached = this.commentCache.get(number);
     if (!cached || cached.raw !== raw) {
-      cached = { raw, comments: raw.map(toComment), view: null, version: -1 };
-      this.commentCache.set(number, cached);
+      this.commentCache.set(number, { raw, comments: raw.map(toComment), view: null, version: -1 });
     }
+    return this.commentsView(number);
+  }
+
+  commentsView(number) {
+    const cached = this.commentCache.get(number);
     const server = cached.comments;
     const pending = this.pendingComments.get(number);
     if (!pending) return server;

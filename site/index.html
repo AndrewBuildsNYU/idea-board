@@ -87,6 +87,10 @@
           <h1 id="tab-title">Idea Board</h1>
           <p id="tab-count" class="tab-count-line"></p>
         </div>
+        <div class="presence">
+          <span id="live-status" class="live-status live-status--off" role="status"><span class="live-dot" aria-hidden="true"></span><span id="live-label"></span></span>
+          <div id="peers" class="peers" role="group"></div>
+        </div>
         <div class="head-tools">
           <div id="admin-tools" class="admin-tools" hidden>
             <button id="rename-tab" class="btn btn-quiet" type="button">Rename</button>
@@ -123,6 +127,7 @@
           <div id="groups" class="layer groups"></div>
           <svg id="ink" class="layer ink" aria-hidden="true">
             <g id="ink-strokes"></g>
+            <g id="ink-remote"></g>
             <path id="ink-live" class="ink-stroke" hidden></path>
           </svg>
           <svg id="strings" class="layer strings" aria-hidden="true">

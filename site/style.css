@@ -166,6 +166,9 @@
    drawing and writing stay readable on a dark board. */
 :root {
   --font-hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+  --live-on: #2f9e57;
+  --live-wait: #d9a21b;
+  --live-off: #d0632b;
   --pen-ink: #23201c;
   --pen-red: #c0392b;
   --pen-blue: #1f5fae;
@@ -609,6 +612,22 @@ svg.layer { overflow: visible; }
 .empty p:not(.empty-title) { color: var(--muted); }
 .empty .btn { margin-top: 6px; }
 
+.presence { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.live-status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.live-status--off { display: none; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--live-wait); }
+.live-status--live .live-dot { background: var(--live-on); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live-on) 25%, transparent); }
+.live-status--offline .live-dot { background: var(--live-off); }
+.peers { display: flex; padding-left: 6px; }
+.peer {
+  width: 28px; height: 28px; margin-left: -6px;
+  display: grid; place-items: center;
+  font: 700 0.8rem/1 var(--font-display);
+  color: #ffffff; background: var(--peer);
+  border: 2px solid var(--surface); border-radius: 50%;
+}
+.peer--elsewhere { opacity: 0.5; }
+
 .modes { display: flex; gap: 2px; padding: 2px; background: var(--field); border: 1px solid var(--line); border-radius: 9px; }
 .mode {
   font: inherit; font-size: 0.84rem; font-weight: 700;
@@ -808,3 +827,4 @@ dialog::backdrop { background: rgb(12 16 22 / 0.55); }
   .app, .note, .btn { transition: none; }
   .note, .note:hover, .note:focus-visible { transform: none; }
 }
+.peer--more { background: var(--muted); font-size: 0.7rem; }
