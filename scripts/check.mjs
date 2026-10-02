@@ -46,6 +46,15 @@ assert.equal(loose.x, null);
 assert.equal(loose.group, null);
 assert.deepEqual(loose.links, []);
 
+const board = roundTrip({ kind: 'board', id: 'b-abc123', name: 'Planning', owner: 'Dan', visibility: 'private', author: 'Dan' });
+assert.deepEqual([board.kind, board.id, board.name, board.owner, board.visibility, board.personal, board.deleted], ['board', 'b-abc123', 'Planning', 'Dan', 'private', false, false]);
+const mine = roundTrip({ kind: 'board', id: 'me-dan', name: 'My Board', owner: 'Dan', visibility: 'private', personal: true, author: 'Dan' });
+assert.equal(mine.personal, true);
+const gone = roundTrip({ kind: 'board', id: 'general', name: 'General', owner: 'Andrew', visibility: 'public', deleted: true, author: 'Andrew' });
+assert.deepEqual([gone.deleted, gone.visibility], [true, 'public']);
+// A board marker with a malformed id isn't a board; it falls back to an idea rather than breaking the list.
+assert.equal(toItem({ number: 5, title: 'x', body: encodeBody({ type: 'board', id: 'Bad Id!' }, ''), user: { login: 'o' }, created_at: 't', updated_at: 't' }).kind, 'idea');
+
 const group = roundTrip({ kind: 'group', name: 'Onboarding', tab: 'general', color: 'teal' });
 assert.deepEqual([group.kind, group.name, group.color, group.tab], ['group', 'Onboarding', 'teal', 'general']);
 

@@ -367,9 +367,9 @@ export function buildNotesPdf(jsPDF, { tabs, ideas, groups, texts, sketches, com
   };
 
   const commentCount = [...comments.values()].reduce((sum, list) => sum + list.length, 0);
-  write('Idea Board', { size: 22, style: 'bold', after: 2 });
+  write('FEDI Boards', { size: 22, style: 'bold', after: 2 });
   write(`Every idea and comment, exported ${day.format(new Date())} by ${exportedBy}.`, { size: 10, color: GREY, after: 2 });
-  write(`${tabs.length} ${tabs.length === 1 ? 'tab' : 'tabs'}, ${ideas.length} ${ideas.length === 1 ? 'idea' : 'ideas'}, ${commentCount} ${commentCount === 1 ? 'comment' : 'comments'}.`, { size: 10, color: GREY, after: 14 });
+  write(`${tabs.length} ${tabs.length === 1 ? 'board' : 'boards'}, ${ideas.length} ${ideas.length === 1 ? 'idea' : 'ideas'}, ${commentCount} ${commentCount === 1 ? 'comment' : 'comments'}.`, { size: 10, color: GREY, after: 14 });
 
   const titleOf = new Map(ideas.map((idea) => [idea.number, idea.title]));
   const connections = new Map(ideas.map((idea) => [idea.number, new Set()]));
@@ -394,7 +394,7 @@ export function buildNotesPdf(jsPDF, { tabs, ideas, groups, texts, sketches, com
       { title: tabGroups.length ? 'Not in a group' : null, ideas: here.filter((idea) => !tabGroups.some((group) => group.number === idea.group)) },
     ].filter((section) => section.ideas.length);
 
-    if (!here.length) write('No ideas on this tab.', { color: GREY, after: 8 });
+    if (!here.length) write('No ideas on this board.', { color: GREY, after: 8 });
 
     for (const section of sections) {
       if (section.title) {
@@ -431,7 +431,7 @@ export function buildNotesPdf(jsPDF, { tabs, ideas, groups, texts, sketches, com
     }
     const drawings = sketches.filter((item) => tabOf(item) === tab.id).length;
     if (drawings) {
-      write(`This tab also has ${drawings === 1 ? '1 drawing, which only appears' : `${drawings} drawings, which only appear`} on the board.`, { size: 9, color: GREY, after: 4 });
+      write(`This board also has ${drawings === 1 ? '1 drawing, which only appears' : `${drawings} drawings, which only appear`} on the board.`, { size: 9, color: GREY, after: 4 });
     }
   });
 
@@ -441,7 +441,7 @@ export function buildNotesPdf(jsPDF, { tabs, ideas, groups, texts, sketches, com
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(...GREY);
-    doc.text(`Idea Board  -  page ${i} of ${pages}`, page.width / 2, page.height - 28, { align: 'center' });
+    doc.text(`FEDI Boards  -  page ${i} of ${pages}`, page.width / 2, page.height - 28, { align: 'center' });
   }
   return doc;
 }

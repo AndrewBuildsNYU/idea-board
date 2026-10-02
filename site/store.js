@@ -6,9 +6,11 @@
 //   a group     "group"    title = the group's name; ideas point at it
 //   board text  "text"     body = the words written on the board
 //   a drawing   "sketch"   body = its pen strokes, one per line
+//   a board     "board"    title = the board's name; things on it name its id
 //   comments    comments on an idea's issue
 //   removing    closes the issue, so nothing is ever destroyed by the board
-//   the tabs    tabs.json at the repository root
+// tabs.json at the repository root holds the boards made before boards were
+// issues. It is only read now; a board issue with the same id overrides one.
 // Lines between ideas are stored on the idea they were drawn from (`links`).
 //
 // Who wrote something is a first name in the same marker, because every
@@ -139,6 +141,18 @@ function toItem(issue) {
   if (m.type === 'group') {
     return { ...base, kind: 'group', name: issue.title, color: GROUP_COLORS.includes(m.color) ? m.color : 'blue' };
   }
+  if (m.type === 'board' && typeof m.id === 'string' && /^[a-z0-9-]{1,60}$/.test(m.id)) {
+    return {
+      ...base,
+      kind: 'board',
+      id: m.id,
+      name: issue.title,
+      owner: typeof m.owner === 'string' ? m.owner : null,
+      visibility: m.visibility === 'private' ? 'private' : 'public',
+      personal: m.personal === true,
+      deleted: m.deleted === true,
+    };
+  }
   if (m.type === 'text') {
     return {
       ...base,
@@ -170,6 +184,12 @@ function toItem(issue) {
 
 // The inverse of toItem: what an item looks like as an issue.
 function encodeItem(item) {
+  if (item.kind === 'board') {
+    const meta = { type: 'board', id: item.id, owner: item.owner, visibility: item.visibility, author: item.author };
+    if (item.personal) meta.personal = true;
+    if (item.deleted) meta.deleted = true;
+    return { title: item.name, body: encodeBody(meta, '') };
+  }
   if (item.kind === 'group') {
     return { title: item.name, body: encodeBody({ type: 'group', tab: item.tab, color: item.color }, '') };
   }

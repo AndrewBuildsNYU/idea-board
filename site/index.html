@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>Idea Board</title>
+  <title>FEDI Boards</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,7 +19,7 @@
   <main id="signin" class="signin">
     <div class="signin-card">
       <span class="pin" aria-hidden="true"></span>
-      <h1 class="signin-title">Idea Board</h1>
+      <h1 class="signin-title">FEDI Boards</h1>
       <p class="signin-lede">Pin an idea, read what the team is thinking, and talk it through.</p>
 
       <form id="signin-form" class="stack" hidden>
@@ -41,12 +41,12 @@
 
   <div id="app" class="app" hidden>
     <aside id="rail" class="rail">
-      <div class="brand"><span class="brand-pin" aria-hidden="true"></span>Idea Board</div>
+      <div class="brand"><span class="brand-pin" aria-hidden="true"></span>FEDI Boards</div>
 
       <div class="rail-tabs">
-        <p class="rail-label" id="tabs-label">Tabs</p>
+        <p class="rail-label" id="tabs-label">Boards</p>
         <nav id="tab-list" class="tab-list" aria-labelledby="tabs-label"></nav>
-        <button id="new-tab" class="rail-add" type="button" hidden>+ New tab</button>
+        <button id="new-tab" class="rail-add" type="button">+ New board</button>
       </div>
 
       <div class="rail-foot">
@@ -84,19 +84,17 @@
           <span id="rail-toggle-label" class="sr-only">Hide the side panel</span>
         </button>
         <div class="head-title">
-          <h1 id="tab-title">Idea Board</h1>
-          <p id="tab-count" class="tab-count-line"></p>
+          <h1 id="tab-title">FEDI Boards</h1>
+          <p class="tab-count-line"><span id="board-badge" class="private-badge" title="Only you can see this board" hidden>Private</span><span id="tab-count"></span></p>
         </div>
         <div class="presence">
           <span id="live-status" class="live-status live-status--off" role="status"><span class="live-dot" aria-hidden="true"></span><span id="live-label"></span></span>
           <div id="peers" class="peers" role="group"></div>
         </div>
         <div class="head-tools">
-          <div id="admin-tools" class="admin-tools" hidden>
-            <button id="rename-tab" class="btn btn-quiet" type="button">Rename</button>
-            <button id="move-up" class="btn btn-quiet" type="button">Move up</button>
-            <button id="move-down" class="btn btn-quiet" type="button">Move down</button>
-            <button id="delete-tab" class="btn btn-quiet btn-quiet-danger" type="button">Delete tab</button>
+          <div id="board-tools" class="admin-tools" hidden>
+            <button id="board-settings" class="btn btn-quiet" type="button">Board settings</button>
+            <button id="delete-board" class="btn btn-quiet btn-quiet-danger" type="button">Delete board</button>
           </div>
           <div class="modes" role="group" aria-label="Board tool">
             <button class="mode" type="button" data-mode="move" aria-pressed="true" title="Move notes and look around">Move</button>
@@ -114,7 +112,7 @@
             <button id="download-btn" class="btn btn-quiet" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="download-menu">Download</button>
             <div id="download-menu" class="board-menu download-menu" role="menu" aria-label="Download" hidden>
               <button id="download-png" class="menu-item" type="button" role="menuitem">This view as a picture<span class="menu-sub">PNG of exactly what's on your screen</span></button>
-              <button id="download-pdf" class="menu-item" type="button" role="menuitem">All notes and comments<span class="menu-sub">PDF of every tab</span></button>
+              <button id="download-pdf" class="menu-item" type="button" role="menuitem">All notes and comments<span class="menu-sub">PDF of every board you can see</span></button>
             </div>
           </div>
           <button id="new-idea" class="btn btn-primary" type="button">New idea</button>
@@ -209,7 +207,7 @@
           </div>
         </fieldset>
         <div class="field">
-          <label for="idea-tab">Tab</label>
+          <label for="idea-tab">Board</label>
           <select id="idea-tab"></select>
         </div>
       </div>
@@ -257,7 +255,7 @@
         <h2 id="admin-dialog-title">Turn on admin tools</h2>
         <button class="btn btn-quiet" type="button" data-close>Cancel</button>
       </div>
-      <p class="muted">Admin tools let you create, rename, reorder and delete tabs, and remove anyone's idea or comment.</p>
+      <p class="muted">Admin tools let you rename or delete any shared board, and remove anyone's idea, text, drawing or comment. Private boards stay private, even from the admin.</p>
       <div class="field">
         <label for="admin-password">Admin password</label>
         <input id="admin-password" type="password" autocomplete="off" required>
@@ -272,16 +270,28 @@
   <dialog id="tab-dialog" aria-labelledby="tab-dialog-title">
     <form id="tab-form" class="dialog-body">
       <div class="dialog-head">
-        <h2 id="tab-dialog-title">New tab</h2>
+        <h2 id="tab-dialog-title">New board</h2>
         <button class="btn btn-quiet" type="button" data-close>Cancel</button>
       </div>
       <div class="field">
-        <label for="tab-name">Tab name</label>
-        <input id="tab-name" type="text" maxlength="40" required>
+        <label for="tab-name">Board name</label>
+        <input id="tab-name" type="text" maxlength="40" required autocomplete="off">
       </div>
+      <fieldset id="board-visibility" class="field visibility">
+        <legend>Who can see it</legend>
+        <label class="choice" for="board-vis-public">
+          <input type="radio" name="board-visibility" id="board-vis-public" value="public">
+          <span><strong>Public</strong>Everyone on the team can see it and add to it.</span>
+        </label>
+        <label class="choice" for="board-vis-private">
+          <input type="radio" name="board-visibility" id="board-vis-private" value="private">
+          <span><strong>Private</strong>Only you will see it. It's hidden from others in the app, not locked: anyone with the team password could still reach it.</span>
+        </label>
+      </fieldset>
+      <p id="board-visibility-note" class="hint" hidden>Only the person who made this board can change who sees it.</p>
       <p id="tab-error" class="form-error" role="alert" hidden></p>
       <div class="dialog-actions">
-        <button id="tab-submit" class="btn btn-primary" type="submit">Create tab</button>
+        <button id="tab-submit" class="btn btn-primary" type="submit">Create board</button>
       </div>
     </form>
   </dialog>

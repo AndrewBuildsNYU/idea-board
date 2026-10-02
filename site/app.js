@@ -1,6 +1,7 @@
-// The board's screens: sign in, tabs, a zoomable board per tab (notes, lines
-// between them, groups, handwritten text and drawings), one idea with its
-// comments, and the admin tools for managing tabs.
+// FEDI Boards' screens: sign in, boards (each a zoomable surface of notes,
+// lines between them, groups, handwritten text and drawings; shared with the
+// team or private to one person), one idea with its comments, and the admin
+// tools for tidying up shared boards.
 //
 // All user-written text reaches the page through textContent (the h() helper
 // appends strings as text nodes). Nothing here ever assigns innerHTML.
@@ -49,7 +50,11 @@ const state = {
   store: null,
   admin: null, // a Store holding the admin key, once unlocked
   loaded: false,
-  tabs: [],
+  tabs: [], // the boards this person can see
+  allBoards: [], // every board, including other people's private ones (never shown)
+  boardItems: [],
+  legacyTabs: [],
+  editingBoard: null,
   current: null,
   serverItems: null,
   items: [],
@@ -208,15 +213,72 @@ function canChange(author) {
   return Boolean(state.admin) || sameName(author, state.session.name);
 }
 
+// Internally a board is still a "tab": state.tabs is the boards this person
+// can see, in the order the side panel lists them.
 function currentTab() {
   return state.tabs.find((tab) => tab.id === state.current) || null;
 }
 
-// Anything whose tab no longer exists shows on the first tab, so nothing is
-// ever stranded out of sight.
+// Which visible board something is on, or null when it's on a board this
+// person can't see (somebody else's private board, or one that was deleted).
+// Things from before boards were named at all go on the first shared board.
 function tabOf(item) {
   if (state.tabs.some((tab) => tab.id === item.tab)) return item.tab;
-  return state.tabs.length ? state.tabs[0].id : null;
+  if (item.tab == null) {
+    const shared = state.tabs.find((tab) => tab.visibility === 'public');
+    return shared ? shared.id : null;
+  }
+  return null;
+}
+
+function boardById(id) {
+  return state.allBoards.find((board) => board.id === id) || null;
+}
+
+function isPrivateBoard(id) {
+  const board = boardById(id);
+  return Boolean(board && board.visibility === 'private');
+}
+
+// What the relay may carry about an item: nothing on a private board goes to
+// other people's browsers. A board itself is always relayed (only its name
+// and settings), so one made private or deleted leaves everyone's list at once.
+function shareable(item) {
+  if (!item) return true;
+  if (item.kind === 'board') return true;
+  return !isPrivateBoard(item.tab);
+}
+
+function personalBoardId(name) {
+  return `me-${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'board'}`;
+}
+
+function canManageBoard(board) {
+  if (!board || !state.session) return false;
+  if (board.personal) return false;
+  return sameName(board.owner || '', state.session.name) || (Boolean(state.admin) && board.visibility === 'public');
+}
+
+// Boards come from two places: board issues, and the older tabs.json (read
+// only; a board issue with the same id overrides its entry, including a
+// "deleted" one). The owner of an old board is the admin.
+function computeBoards() {
+  const me = state.session ? state.session.name : '';
+  const fromIssues = new Map();
+  for (const board of [...state.boardItems].sort((a, b) => a.number - b.number)) {
+    if (!fromIssues.has(board.id)) fromIssues.set(board.id, board); // a duplicate made in a race: oldest wins
+  }
+  const adminName = state.session ? state.session.member.admin : null;
+  const legacy = state.legacyTabs
+    .filter((tab) => !fromIssues.has(tab.id))
+    .map((tab, index) => ({ id: tab.id, name: tab.name, owner: adminName, visibility: 'public', personal: false, legacy: true, order: index }));
+  const all = [...legacy, ...[...fromIssues.values()].filter((board) => !board.deleted)];
+  state.allBoards = [...legacy, ...fromIssues.values()];
+  const mine = (board) => sameName(board.owner || '', me);
+  const visible = all.filter((board) => board.visibility === 'public' || mine(board));
+  const rank = (board) => (board.personal && mine(board) ? 0 : board.legacy ? 1 : 2);
+  visible.sort((a, b) => rank(a) - rank(b) || (a.legacy ? a.order - b.order : (a.number || 0) - (b.number || 0)));
+  state.tabs = visible;
 }
 
 function onTab(list, tabId = state.current) {
@@ -239,6 +301,8 @@ function setItems(items) {
   state.groups = items.filter((item) => item.kind === 'group');
   state.texts = items.filter((item) => item.kind === 'text');
   state.sketches = items.filter((item) => item.kind === 'sketch');
+  state.boardItems = items.filter((item) => item.kind === 'board');
+  computeBoards();
 }
 
 function patchLocal(number, changes) {
@@ -387,8 +451,9 @@ function signOut() {
   stopPolling();
   closeDialogs();
   writeStorage('sessionStorage', KEYS.session, null);
-  Object.assign(state, { session: null, store: null, admin: null, loaded: false, tabs: [], serverItems: null, current: null });
+  Object.assign(state, { store: null, admin: null, loaded: false, legacyTabs: [], serverItems: null, current: null });
   setItems([]);
+  state.session = null;
   history.replaceState(null, '', location.pathname);
   showSignin('ready');
 }
@@ -410,18 +475,37 @@ async function startBoard(session) {
   renderAll();
   startLive();
   await Promise.all([refreshTabs(), refreshItems()]);
+  await ensureMyBoard();
   state.loaded = true;
   chooseTab(initialTab());
   startPolling();
 }
 
+// Everyone has a private "My Board". It's made the first time they sign in
+// (only once the board list has loaded, so a failed load can't make a second).
+async function ensureMyBoard() {
+  const me = state.session.name;
+  if (state.serverItems == null) return;
+  if (state.allBoards.some((board) => board.personal && sameName(board.owner || '', me))) return;
+  try {
+    upsertLocal(await state.store.createItem({
+      kind: 'board', id: personalBoardId(me), name: 'My Board', owner: me, visibility: 'private', personal: true, author: me,
+    }));
+  } catch (error) {
+    toast(`Your private board couldn't be set up. ${error.message}`, true);
+  }
+}
+
+// Opens on the board in the address, else the last one used, else the first
+// shared board (where the team is), else whatever there is.
 function initialTab() {
   const ids = state.tabs.map((tab) => tab.id);
   const fromHash = decodeURIComponent(location.hash.slice(1));
   if (ids.includes(fromHash)) return fromHash;
   const remembered = readStorage('localStorage', KEYS.tab);
   if (ids.includes(remembered)) return remembered;
-  return ids[0] || null;
+  const shared = state.tabs.find((tab) => tab.visibility === 'public');
+  return shared ? shared.id : ids[0] || null;
 }
 
 function chooseTab(id) {
@@ -442,16 +526,12 @@ async function refreshTabs() {
   if (state.busy.tabs || !state.store) return;
   state.busy.tabs = true;
   try {
-    // The admin's store remembers its own recent tab writes, which GitHub may
-    // not be serving yet; reading through it keeps an edit from flickering back.
-    const { tabs } = await (state.admin || state.store).getTabs();
-    if (tabs !== state.tabs) {
-      state.tabs = tabs;
-      if (state.loaded && !tabs.some((tab) => tab.id === state.current)) {
-        chooseTab(tabs.length ? tabs[0].id : null);
-      } else {
-        renderAll();
-      }
+    // The boards from before boards were issues; read only.
+    const { tabs } = await state.store.getTabs();
+    if (tabs !== state.legacyTabs) {
+      state.legacyTabs = tabs;
+      computeBoards();
+      renderAll();
     }
     $('banner').hidden = true;
   } catch (error) {
@@ -507,8 +587,13 @@ function stopPolling() {
 function startLive() {
   stopLive();
   const { member } = state.session;
-  state.store.onChange = (number, item) => announce({ t: 'item', number, item });
-  state.store.onComment = (number, id, comment) => announce({ t: 'comment', number, id, comment });
+  // Nothing on a private board is relayed: other people's browsers never get it.
+  state.store.onChange = (number, item) => {
+    if (shareable(item || findItem(number))) announce({ t: 'item', number, item });
+  };
+  state.store.onComment = (number, id, comment) => {
+    if (shareable(findItem(number))) announce({ t: 'comment', number, id, comment });
+  };
   state.live = new Live({
     secret: `${member.repo}|${member.token}`,
     onMessage: onLive,
@@ -559,7 +644,9 @@ function setLiveStatus(status) {
 }
 
 function sayHello(ask) {
-  if (state.live && state.session) announce({ t: 'hello', name: state.session.name, tab: state.current, ask });
+  // On a private board, people see you're here but not where.
+  const where = isPrivateBoard(state.current) ? null : state.current;
+  if (state.live && state.session) announce({ t: 'hello', name: state.session.name, tab: where, ask });
 }
 
 // After somebody else's change, check GitHub a little later: it confirms the
@@ -600,6 +687,9 @@ function onLive(message) {
         if (!move || Date.now() - move.at > 1500) state.remoteMoves.delete(message.number);
         applyStoreView();
       }
+      // A board that just became visible here (made public) has things on it
+      // that were never relayed; fetch them now rather than at the next check.
+      if (message.item && message.item.kind === 'board') reconcileSoon(600);
       break;
     }
     case 'move': {
@@ -644,15 +734,6 @@ function onLive(message) {
       state.remoteInk.delete(message.id);
       drawRemoteInk();
       break;
-    case 'tabs': {
-      if (!Array.isArray(message.tabs)) return;
-      state.store.acceptTabs(message.tabs, message.sha);
-      if (state.admin) state.admin.acceptTabs(message.tabs, message.sha);
-      state.tabs = state.store.tabCache.value.tabs;
-      if (!state.tabs.some((tab) => tab.id === state.current)) chooseTab(state.tabs.length ? state.tabs[0].id : null);
-      else renderAll();
-      break;
-    }
     case 'comment': {
       state.store.rememberComment(message.number, message.id, message.comment || null, { quiet: true });
       if (state.detail === message.number) {
@@ -688,7 +769,7 @@ function onLive(message) {
 
 // Positions of things being dragged go out ~20 times a second, newest only.
 function liveMoves(list) {
-  if (!state.live || state.liveStatus !== 'live') return;
+  if (!state.live || state.liveStatus !== 'live' || isPrivateBoard(state.current)) return;
   for (const { number, x, y } of list) state.outgoingMoves.set(number, { number, x, y });
   if (state.outgoingTimer) return;
   state.outgoingTimer = setTimeout(() => {
@@ -757,9 +838,24 @@ function renderPresence() {
 
 function renderAll() {
   if (!state.session) return;
+  // The board on screen was deleted or made private by its owner: move on.
+  if (state.loaded && state.tabs.length && !currentTab()) {
+    state.current = initialTab();
+    history.replaceState(null, '', `#${state.current}`);
+    setTimeout(restoreView, 0);
+  }
   renderWho();
   renderTabs();
   renderBoard();
+}
+
+function lockIcon() {
+  const icon = svg('svg', { viewBox: '0 0 16 16', width: '12', height: '12', class: 'lock', 'aria-hidden': 'true' });
+  icon.append(
+    svg('rect', { x: '3', y: '7', width: '10', height: '7', rx: '1.5', fill: 'currentColor' }),
+    svg('path', { d: 'M5.5 7V5a2.5 2.5 0 0 1 5 0v2', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' }),
+  );
+  return icon;
 }
 
 function renderWho() {
@@ -776,33 +872,31 @@ function renderWho() {
 function renderTabs() {
   const list = $('tab-list');
   if (!state.tabs.length) {
-    list.replaceChildren(h('p', { class: 'rail-empty' }, state.loaded ? 'No tabs yet' : 'Loading...'));
+    list.replaceChildren(h('p', { class: 'rail-empty' }, state.loaded ? 'No boards yet' : 'Loading...'));
   } else {
     list.replaceChildren(...state.tabs.map((tab) => h('button', {
       type: 'button',
-      class: 'tab',
+      class: `tab${tab.visibility === 'private' ? ' tab--private' : ''}`,
       'aria-current': tab.id === state.current ? 'page' : null,
+      title: tab.visibility === 'private' ? 'Private: only you can see this board' : null,
       onclick: () => chooseTab(tab.id),
-    }, h('span', { class: 'tab-name' }, tab.name), h('span', { class: 'tab-count' }, String(ideasIn(tab.id).length)))));
+    },
+    tab.visibility === 'private' ? lockIcon() : null,
+    h('span', { class: 'tab-name' }, tab.name),
+    h('span', { class: 'tab-count' }, String(ideasIn(tab.id).length)))));
   }
-  $('new-tab').hidden = !state.admin;
 }
 
 function renderBoard() {
   const tab = currentTab();
   const ideas = tab ? ideasIn(tab.id) : [];
-  $('tab-title').textContent = tab ? tab.name : 'Idea Board';
+  $('tab-title').textContent = tab ? tab.name : 'FEDI Boards';
   $('tab-count').textContent = tab ? plural(ideas.length, 'idea') : '';
-  document.title = tab ? `${tab.name} - Idea Board` : 'Idea Board';
+  $('board-badge').hidden = !(tab && tab.visibility === 'private');
+  document.title = tab ? `${tab.name} - FEDI Boards` : 'FEDI Boards';
   $('new-idea').disabled = !tab;
   for (const button of document.querySelectorAll('.mode')) button.disabled = !tab;
-
-  $('admin-tools').hidden = !(state.admin && tab);
-  if (tab) {
-    const index = state.tabs.indexOf(tab);
-    $('move-up').disabled = index <= 0;
-    $('move-down').disabled = index >= state.tabs.length - 1;
-  }
+  $('board-tools').hidden = !canManageBoard(tab);
 
   // Never rebuild the board under someone's finger; catch up when they let go.
   if (state.drag) {
@@ -820,23 +914,18 @@ function renderBoard() {
     empty.replaceChildren(h('p', { class: 'empty-title' }, 'Loading the board...'));
     empty.hidden = false;
   } else if (!tab) {
-    empty.replaceChildren(...(state.admin
-      ? [
-          h('p', { class: 'empty-title' }, 'Create the first tab'),
-          h('p', {}, 'Tabs group ideas by theme. Only you can create them.'),
-          h('button', { class: 'btn btn-primary', type: 'button', onclick: () => openTabDialog('create') }, 'New tab'),
-        ]
-      : [
-          h('p', { class: 'empty-title' }, 'No tabs yet'),
-          h('p', {}, isAdminName()
-            ? 'Turn on admin tools at the bottom of the side panel to create the first tab.'
-            : "Whoever runs the board hasn't created any tabs yet, so there's nowhere to pin ideas."),
-        ]));
+    empty.replaceChildren(
+      h('p', { class: 'empty-title' }, 'No boards yet'),
+      h('p', {}, 'Make a board to start pinning ideas. You can share it with the team or keep it to yourself.'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => openBoardDialog(null) }, 'New board'),
+    );
     empty.hidden = false;
   } else if (nothingHere && state.mode === 'move') {
     empty.replaceChildren(
       h('p', { class: 'empty-title' }, `Nothing on ${tab.name} yet`),
-      h('p', {}, 'Post the first idea, or double-click anywhere on the board to write or draw.'),
+      h('p', {}, tab.visibility === 'private'
+        ? 'This board is private: nobody else sees it. Post an idea, or double-click anywhere to write or draw.'
+        : 'Post the first idea, or double-click anywhere on the board to write or draw.'),
       h('button', { class: 'btn btn-primary', type: 'button', onclick: () => openIdeaDialog(null) }, 'New idea'),
     );
     empty.hidden = false;
@@ -1212,6 +1301,7 @@ function extendStroke(event) {
 
 function sendInk(stroke) {
   if (!state.live || state.liveStatus !== 'live' || stroke.sent >= stroke.points.length) return;
+  if (isPrivateBoard(state.current)) return;
   const points = stroke.points.slice(stroke.sent).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
   announce({ t: 'ink', id: stroke.id, tab: state.current, color: stroke.color, width: stroke.width, start: stroke.sent, points });
   stroke.sent = stroke.points.length;
@@ -1232,7 +1322,9 @@ function finishStroke() {
   if (!stroke) return;
   const points = simplify(stroke.points, 0.8).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
   const line = `${stroke.color}|${stroke.width}|${points.map((p) => `${p.x},${p.y}`).join(' ')}`;
-  announce({ t: 'ink-done', id: stroke.id, tab: state.current, color: stroke.color, width: stroke.width, line });
+  if (!isPrivateBoard(state.current)) {
+    announce({ t: 'ink-done', id: stroke.id, tab: state.current, color: stroke.color, width: stroke.width, line });
+  }
   addStroke(line);
 }
 
@@ -1659,7 +1751,7 @@ async function downloadPicture() {
     const blob = await new Promise((resolve, reject) => {
       canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('The browser could not encode it.'))), 'image/png');
     });
-    saveFile(blob, `idea-board-${fileSlug(tab.name)}-${fileStamp()}.png`);
+    saveFile(blob, `fedi-boards-${fileSlug(tab.name)}-${fileStamp()}.png`);
     toast(`Saved a ${canvas.width} x ${canvas.height} picture of this view.`);
   } catch (error) {
     toast(`The picture couldn't be made. ${error.message}`, true);
@@ -1718,7 +1810,7 @@ async function downloadNotes() {
       tabOf,
       exportedBy: state.session.name,
     });
-    saveFile(doc.output('blob'), `idea-board-notes-${fileStamp()}.pdf`);
+    saveFile(doc.output('blob'), `fedi-boards-notes-${fileStamp()}.pdf`);
     toast('Saved every note and comment as a PDF.');
   } catch (error) {
     toast(`The PDF couldn't be made. ${error.message}`, true);
@@ -2538,125 +2630,132 @@ async function unlockAdmin(event) {
   });
 }
 
-// Reads the latest tabs.json, applies the change and writes it back. GitHub
-// refuses a write against a stale sha, so a clash with another tab of
-// yours is retried once from fresh.
-async function changeTabs(message, mutate) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { tabs, sha } = await state.admin.getTabs(true);
-    const next = mutate(tabs.map((tab) => ({ ...tab })));
-    if (!next) return;
-    try {
-      const saved = await state.admin.saveTabs(next, sha, message);
-      state.tabs = saved.tabs;
-      state.store.acceptTabs(saved.tabs, saved.sha);
-      announce({ t: 'tabs', tabs: saved.tabs, sha: saved.sha });
-      return;
-    } catch (error) {
-      if (attempt === 0 && (error.status === 409 || error.status === 422)) continue;
-      throw error;
-    }
-  }
+// ---------------------------------------------------------------- boards
+
+function makeBoardId() {
+  return `b-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function makeTabId(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'tab';
-  return `${slug}-${Date.now().toString(36).slice(-5)}`;
+function describeContents(items) {
+  const count = (kind) => items.filter((item) => item.kind === kind).length;
+  const parts = [
+    [count('idea'), 'idea'],
+    [count('text'), 'piece of text', 'pieces of text'],
+    [count('sketch'), 'drawing'],
+    [count('group'), 'group'],
+  ].filter(([n]) => n).map(([n, one, many]) => `${n} ${n === 1 ? one : many || `${one}s`}`);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || 'nothing';
 }
 
-function openTabDialog(mode) {
-  const tab = currentTab();
-  if (mode === 'rename' && !tab) return;
-  state.tabMode = mode;
-  $('tab-dialog-title').textContent = mode === 'create' ? 'New tab' : 'Rename tab';
-  $('tab-submit').textContent = mode === 'create' ? 'Create tab' : 'Save name';
-  $('tab-name').value = mode === 'rename' ? tab.name : '';
+// One dialog for a new board and for an existing board's settings. Only the
+// person who owns a board decides whether it's private.
+function openBoardDialog(board) {
+  state.editingBoard = board;
+  const ownsIt = !board || sameName(board.owner || '', state.session.name);
+  $('tab-dialog-title').textContent = board ? 'Board settings' : 'New board';
+  $('tab-submit').textContent = board ? 'Save' : 'Create board';
+  $('tab-name').value = board ? board.name : '';
+  $(`board-vis-${board ? board.visibility : 'public'}`).checked = true;
+  $('board-visibility').disabled = !ownsIt;
+  $('board-visibility-note').hidden = ownsIt;
   $('tab-error').hidden = true;
   $('tab-dialog').showModal();
   $('tab-name').focus();
 }
 
-async function saveTab(event) {
+async function saveBoard(event) {
   event.preventDefault();
   $('tab-error').hidden = true;
   const name = $('tab-name').value.trim().replace(/\s+/g, ' ');
+  const checked = document.querySelector('input[name="board-visibility"]:checked');
+  const visibility = checked && checked.value === 'private' ? 'private' : 'public';
   if (!name) {
-    showError('tab-error', 'Give the tab a name.');
+    showError('tab-error', 'Give the board a name.');
     return;
   }
-  const mode = state.tabMode;
-  const targetId = state.current;
+  const board = state.editingBoard;
+  if (state.tabs.some((tab) => (!board || tab.id !== board.id) && sameName(tab.name, name))) {
+    showError('tab-error', `There's already a board called ${name}.`);
+    return;
+  }
+  const me = state.session.name;
   await busy($('tab-submit'), 'Saving...', async () => {
-    const id = makeTabId(name);
-    let duplicate = false;
+    let id;
     try {
-      await changeTabs(mode === 'create' ? `Add tab: ${name}` : `Rename tab: ${name}`, (tabs) => {
-        if (tabs.some((tab) => tab.id !== targetId && sameName(tab.name, name)) ||
-            (mode === 'create' && tabs.some((tab) => sameName(tab.name, name)))) {
-          duplicate = true;
-          return null;
-        }
-        return mode === 'create'
-          ? [...tabs, { id, name }]
-          : tabs.map((tab) => (tab.id === targetId ? { ...tab, name } : tab));
-      });
+      if (!board) {
+        id = makeBoardId();
+        upsertLocal(await state.store.createItem({ kind: 'board', id, name, owner: me, visibility, author: me }));
+      } else if (board.legacy) {
+        // A board from before boards were issues becomes one the first time it
+        // changes, keeping its id so everything on it stays put.
+        id = board.id;
+        upsertLocal(await state.store.createItem({ kind: 'board', id, name, owner: board.owner, visibility, author: me }));
+      } else {
+        id = board.id;
+        upsertLocal(await state.store.patchItem(board.number, { name, visibility }));
+      }
     } catch (error) {
       showError('tab-error', error.message);
       return;
     }
-    if (duplicate) {
-      showError('tab-error', `There's already a tab called ${name}.`);
-      return;
-    }
     $('tab-dialog').close();
-    if (mode === 'create') {
+    if (!board) {
       chooseTab(id);
-      toast(`Created ${name}.`);
+      toast(visibility === 'private' ? `Created ${name}. Only you can see it.` : `Created ${name}.`);
     } else {
       renderAll();
-      toast('Tab renamed.');
+      const madePrivate = visibility === 'private' && board.visibility !== 'private';
+      toast(madePrivate ? 'Saved. This board is private now, so only you can see it.' : 'Saved.');
     }
+    refreshItems();
   });
 }
 
-async function moveTab(delta) {
-  const id = state.current;
-  try {
-    await changeTabs('Reorder tabs', (tabs) => {
-      const from = tabs.findIndex((tab) => tab.id === id);
-      const to = from + delta;
-      if (from < 0 || to < 0 || to >= tabs.length) return null;
-      [tabs[from], tabs[to]] = [tabs[to], tabs[from]];
-      return tabs;
-    });
-  } catch (error) {
-    toast(error.message, true);
-    return;
-  }
-  renderAll();
-}
-
-async function deleteTab() {
-  const tab = currentTab();
-  if (!tab) return;
-  if (ideasIn(tab.id).length || onTab(state.texts, tab.id).length || onTab(state.sketches, tab.id).length) {
-    toast(`${tab.name} isn't empty. Move or remove its ideas, text and drawings first. To move an idea, open it, choose Edit and pick another tab.`, true);
-    return;
-  }
+// Deleting a board takes everything on it with it (closed, not destroyed:
+// the issues can still be reopened on GitHub).
+async function deleteBoard() {
+  const board = currentTab();
+  if (!canManageBoard(board)) return;
+  const contents = state.items.filter((item) => item.kind !== 'board' && item.tab === board.id);
   const ok = await confirmAction({
-    title: `Delete ${tab.name}?`,
-    body: 'The tab is empty, so nothing is lost.',
-    action: 'Delete tab',
+    title: `Delete ${board.name}?`,
+    body: contents.length
+      ? `Everything on it goes too: ${describeContents(contents)}. This can't be undone from here.`
+      : "It's empty, so nothing else is lost.",
+    action: 'Delete board',
   });
   if (!ok) return;
+  const button = $('delete-board');
+  button.disabled = true;
+  button.textContent = 'Deleting...';
+  let failed = null;
   try {
-    await changeTabs(`Delete tab: ${tab.name}`, (tabs) => tabs.filter((item) => item.id !== tab.id));
+    const queue = [...contents];
+    const worker = async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        await state.store.removeItem(item.number);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
+    if (board.legacy) {
+      upsertLocal(await state.store.createItem({
+        kind: 'board', id: board.id, name: board.name, owner: board.owner, visibility: 'public', deleted: true, author: state.session.name,
+      }));
+    } else {
+      await state.store.removeItem(board.number);
+    }
   } catch (error) {
-    toast(error.message, true);
-    return;
+    failed = error;
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Delete board';
   }
-  chooseTab(state.tabs.length ? state.tabs[0].id : null);
-  toast('Tab deleted.');
+  setItems(state.items.filter((item) => item.tab !== board.id && item.number !== board.number));
+  chooseTab(initialTab());
+  if (failed) toast(`${board.name} wasn't fully deleted. ${failed.message}`, true);
+  else toast(`Deleted ${board.name}.`);
+  refreshItems();
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -2709,12 +2808,10 @@ function wire() {
   $('detail-group').addEventListener('change', (event) => {
     if (state.detail != null) changeGroup(state.detail, event.target.value ? Number(event.target.value) : null);
   });
-  $('new-tab').addEventListener('click', () => openTabDialog('create'));
-  $('rename-tab').addEventListener('click', () => openTabDialog('rename'));
-  $('move-up').addEventListener('click', () => moveTab(-1));
-  $('move-down').addEventListener('click', () => moveTab(1));
-  $('delete-tab').addEventListener('click', deleteTab);
-  $('tab-form').addEventListener('submit', saveTab);
+  $('new-tab').addEventListener('click', () => openBoardDialog(null));
+  $('board-settings').addEventListener('click', () => openBoardDialog(currentTab()));
+  $('delete-board').addEventListener('click', deleteBoard);
+  $('tab-form').addEventListener('submit', saveBoard);
 
   $('text-form').addEventListener('submit', saveText);
   $('text-delete').addEventListener('click', eraseText);
