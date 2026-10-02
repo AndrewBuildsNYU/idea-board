@@ -87,8 +87,21 @@ function validTab(tab) {
   return tab && typeof tab.id === 'string' && /^[a-z0-9-]{1,48}$/.test(tab.id) && typeof tab.name === 'string';
 }
 
+// Where a note sits on its tab's board travels in the same hidden marker, so
+// a move is just an edit and everyone sees the same layout. A note with no
+// position (or one written on github.com) is placed automatically.
+function ideaMeta({ author, tab, color, x, y }) {
+  const meta = { author, tab, color };
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    meta.x = Math.round(x);
+    meta.y = Math.round(y);
+  }
+  return meta;
+}
+
 function toIdea(issue) {
   const { meta, text } = parseBody(issue.body);
+  const placed = meta && Number.isFinite(meta.x) && Number.isFinite(meta.y);
   return {
     number: issue.number,
     title: issue.title,
@@ -96,6 +109,8 @@ function toIdea(issue) {
     author: (meta && typeof meta.author === 'string' && meta.author) || issue.user.login,
     tab: meta && typeof meta.tab === 'string' ? meta.tab : null,
     color: meta && COLORS.includes(meta.color) ? meta.color : 'yellow',
+    x: placed ? meta.x : null,
+    y: placed ? meta.y : null,
     created: issue.created_at,
     updated: issue.updated_at,
     comments: issue.comments,
@@ -209,20 +224,31 @@ export class Store {
     return ideas;
   }
 
-  async createIdea({ title, text, tab, color, author }) {
-    const body = encodeBody({ author, tab, color }, text);
+  async createIdea({ title, text, tab, color, author, x, y }) {
+    const body = encodeBody(ideaMeta({ author, tab, color, x, y }), text);
     const { data } = await this.request('POST', `/repos/${this.repo}/issues`, { body: { title, body } });
     const idea = toIdea(data);
     this.rememberIdea(idea.number, idea);
     return idea;
   }
 
-  async updateIdea(idea, { title, text, tab, color }) {
-    const body = encodeBody({ author: idea.author, tab, color }, text);
-    const { data } = await this.request('PATCH', `/repos/${this.repo}/issues/${idea.number}`, { body: { title, body } });
+  // `changes` is any subset of title, text, tab, color, x, y; the rest is kept.
+  async updateIdea(idea, changes) {
+    const next = { ...idea, ...changes };
+    const body = encodeBody(ideaMeta(next), next.text);
+    const { data } = await this.request('PATCH', `/repos/${this.repo}/issues/${idea.number}`, {
+      body: { title: next.title, body },
+    });
     const updated = toIdea(data);
     this.rememberIdea(updated.number, updated);
     return updated;
+  }
+
+  // Moving rewrites only the position. It reads the issue first so that a
+  // move never puts back an older title or text over somebody's edit.
+  async moveIdea(number, x, y) {
+    const { data: issue } = await this.request('GET', `/repos/${this.repo}/issues/${number}`);
+    return this.updateIdea(toIdea(issue), { x, y });
   }
 
   async removeIdea(number) {

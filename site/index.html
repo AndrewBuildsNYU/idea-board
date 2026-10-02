@@ -10,6 +10,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500..750&display=swap">
   <link rel="stylesheet" href="style.css">
+  <!-- Not deferred: the saved theme has to be on <html> before the first paint. -->
+  <script src="theme.js"></script>
   <script type="module" src="app.js"></script>
 </head>
 <body class="cork">
@@ -38,7 +40,7 @@
   </main>
 
   <div id="app" class="app" hidden>
-    <aside class="rail">
+    <aside id="rail" class="rail">
       <div class="brand"><span class="brand-pin" aria-hidden="true"></span>Idea Board</div>
 
       <div class="rail-tabs">
@@ -55,6 +57,16 @@
             <span id="who-role" class="who-role"></span>
           </span>
         </div>
+        <label class="theme-pick" for="theme">
+          <span>Theme</span>
+          <select id="theme">
+            <option value="auto">Match my device</option>
+            <option value="cork">Cork</option>
+            <option value="whiteboard">Whiteboard</option>
+            <option value="chalk">Chalkboard</option>
+            <option value="night">Night</option>
+          </select>
+        </label>
         <div class="rail-actions">
           <button id="admin-toggle" class="rail-btn" type="button" hidden>Admin</button>
           <button id="sign-out" class="rail-btn" type="button">Sign out</button>
@@ -64,6 +76,13 @@
 
     <section class="board" aria-labelledby="tab-title">
       <header class="board-head">
+        <button id="rail-toggle" class="btn btn-quiet rail-toggle" type="button" aria-controls="rail" aria-expanded="true">
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+            <rect x="2.5" y="3.5" width="15" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <line x1="7.5" y1="3.5" x2="7.5" y2="16.5" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+          <span id="rail-toggle-label" class="sr-only">Hide the side panel</span>
+        </button>
         <div class="head-title">
           <h1 id="tab-title">Idea Board</h1>
           <p id="tab-count" class="tab-count-line"></p>
@@ -75,21 +94,27 @@
             <button id="move-down" class="btn btn-quiet" type="button">Move down</button>
             <button id="delete-tab" class="btn btn-quiet btn-quiet-danger" type="button">Delete tab</button>
           </div>
-          <label class="sort">
-            <span>Sort</span>
-            <select id="sort">
-              <option value="new">Newest</option>
-              <option value="active">Recently active</option>
-              <option value="discussed">Most discussed</option>
-            </select>
-          </label>
+          <div class="zoom" role="group" aria-label="Zoom">
+            <button id="zoom-out" class="btn btn-quiet zoom-step" type="button" aria-label="Zoom out">&minus;</button>
+            <button id="zoom-level" class="btn btn-quiet zoom-level" type="button" title="Back to 100%">100%</button>
+            <button id="zoom-in" class="btn btn-quiet zoom-step" type="button" aria-label="Zoom in">+</button>
+            <button id="zoom-fit" class="btn btn-quiet" type="button" title="Show the whole board">Fit</button>
+          </div>
           <button id="new-idea" class="btn btn-primary" type="button">New idea</button>
         </div>
       </header>
 
       <p id="banner" class="banner" role="alert" hidden></p>
-      <div id="notes" class="notes"></div>
-      <div id="empty" class="empty" hidden></div>
+      <div id="viewport" class="viewport">
+        <div id="world" class="world cork">
+          <div id="notes" class="notes"></div>
+        </div>
+        <div id="empty" class="empty" hidden></div>
+        <p class="viewport-hint" aria-hidden="true">
+          <span class="hint-mouse">Scroll to zoom &middot; drag the board to look around &middot; drag a note to move it</span>
+          <span class="hint-touch">Pinch to zoom &middot; drag to look around &middot; drag a note to move it</span>
+        </p>
+      </div>
     </section>
   </div>
 

@@ -1,5 +1,5 @@
-// The board's screens: sign in, tabs, notes, one idea with its comments, and
-// the admin tools for managing tabs.
+// The board's screens: sign in, tabs, a zoomable board of notes per tab, one
+// idea with its comments, and the admin tools for managing tabs.
 //
 // All user-written text reaches the page through textContent (the h() helper
 // appends strings as text nodes). Nothing here ever assigns innerHTML.
@@ -9,8 +9,21 @@ import { Store, COLORS } from './store.js';
 
 const SESSION_KEY = 'idea-board:session';
 const TAB_KEY = 'idea-board:tab';
-const SORT_KEY = 'idea-board:sort';
+const THEME_KEY = 'idea-board:theme';
+const VIEW_KEY = 'idea-board:views';
+const RAIL_KEY = 'idea-board:rail';
 const POLL = { ideas: 20000, tabs: 60000, comments: 10000 };
+
+// Every tab's board is this big, in board pixels, and notes can't leave it.
+const BOARD = { width: 3200, height: 2000 };
+// How far people can zoom out and in.
+const ZOOM = { min: 0.25, max: 2, step: 1.25 };
+// A note's width is fixed; its height is nominal, for layout and clamping.
+const NOTE = { width: 220, height: 170 };
+const SLOT = { width: 250, height: 230 };
+// How far past the board's edge someone can pan, in screen pixels.
+const PAN_SLACK = 80;
+const THEMES = ['auto', 'cork', 'whiteboard', 'chalk', 'night'];
 
 const state = {
   vault: null,
@@ -19,9 +32,9 @@ const state = {
   admin: null, // a Store holding the admin key, once unlocked
   loaded: false,
   tabs: [],
+  serverIdeas: null,
   ideas: [],
   current: null,
-  sort: 'new',
   detail: null,
   comments: [],
   commentsLoaded: false,
@@ -30,6 +43,15 @@ const state = {
   timers: [],
   commentTimer: null,
   busy: { ideas: false, tabs: false, comments: false },
+  view: { zoom: 1, x: 32, y: 32 },
+  views: {},
+  spots: new Map(),
+  drag: null,
+  staleBoard: false,
+  suppressClick: false,
+  pointers: new Map(),
+  gesture: null,
+  moves: new Map(), // idea number -> { spot, timer, saving }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -64,6 +86,10 @@ function writeStorage(kind, key, value) {
   } catch {
     // Storage blocked: the board still works, it just forgets on reload.
   }
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function plural(n, word) {
@@ -142,18 +168,41 @@ function ideasIn(tabId) {
   return state.ideas.filter((idea) => tabOf(idea) === tabId);
 }
 
-function sorted(list) {
-  const orders = {
-    new: (a, b) => b.created.localeCompare(a.created),
-    active: (a, b) => b.updated.localeCompare(a.updated),
-    discussed: (a, b) => (b.comments - a.comments) || b.updated.localeCompare(a.updated),
-  };
-  return [...list].sort(orders[state.sort] || orders.new);
+// ---------------------------------------------------------------- theme and panel
+
+function savedTheme() {
+  try {
+    const theme = localStorage.getItem(THEME_KEY);
+    return THEMES.includes(theme) ? theme : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function applyTheme(theme) {
+  const value = THEMES.includes(theme) ? theme : 'auto';
+  if (value === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', value);
+  try {
+    localStorage.setItem(THEME_KEY, value);
+  } catch {
+    // Not remembered, but applied for this visit.
+  }
+}
+
+function setRail(collapsed) {
+  $('app').classList.toggle('rail-collapsed', collapsed);
+  $('rail-toggle').setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  $('rail-toggle-label').textContent = collapsed ? 'Show the side panel' : 'Hide the side panel';
+  $('rail-toggle').title = collapsed ? 'Show the side panel' : 'Hide the side panel';
+  writeStorage('localStorage', RAIL_KEY, collapsed ? 'collapsed' : 'open');
 }
 
 // ---------------------------------------------------------------- sign in
 
 async function boot() {
+  state.views = readStorage('localStorage', VIEW_KEY) || {};
+  if (typeof state.views !== 'object' || Array.isArray(state.views)) state.views = {};
   wire();
   try {
     const res = await fetch('vault.json', { cache: 'no-cache' });
@@ -185,7 +234,7 @@ function showSignin(mode) {
   const note = $('signin-note');
   note.hidden = mode === 'ready';
   if (mode === 'pending') {
-    note.textContent = "This board is almost ready. Its access keys haven't been added yet, so nobody can sign in. If you're setting it up, the README lists the steps.";
+    note.textContent = "This board is almost ready. Its access keys haven't been added yet, so nobody can sign in.";
   } else if (mode === 'unavailable') {
     note.textContent = "The board couldn't load its settings. Refresh the page to try again.";
   }
@@ -223,7 +272,9 @@ function signOut() {
   stopPolling();
   closeDialogs();
   writeStorage('sessionStorage', SESSION_KEY, null);
-  Object.assign(state, { session: null, store: null, admin: null, loaded: false, tabs: [], ideas: [], current: null });
+  Object.assign(state, {
+    session: null, store: null, admin: null, loaded: false, tabs: [], ideas: [], serverIdeas: null, current: null,
+  });
   history.replaceState(null, '', location.pathname);
   showSignin('ready');
 }
@@ -232,16 +283,15 @@ function saveSession() {
   writeStorage('sessionStorage', SESSION_KEY, state.session);
 }
 
-// ---------------------------------------------------------------- the board
+// ---------------------------------------------------------------- data
 
 async function startBoard(session) {
   state.session = session;
   state.store = new Store(session.member);
   state.admin = session.admin ? new Store(session.admin) : null;
-  state.sort = readStorage('localStorage', SORT_KEY) || 'new';
-  $('sort').value = state.sort;
   $('signin').hidden = true;
   $('app').hidden = false;
+  setRail(readStorage('localStorage', RAIL_KEY) === 'collapsed');
   renderAll();
   await Promise.all([refreshTabs(), refreshIdeas()]);
   state.loaded = true;
@@ -265,6 +315,7 @@ function chooseTab(id) {
     writeStorage('localStorage', TAB_KEY, id);
   }
   renderAll();
+  restoreView();
 }
 
 async function refreshTabs() {
@@ -276,8 +327,11 @@ async function refreshTabs() {
     const { tabs } = await (state.admin || state.store).getTabs();
     if (tabs !== state.tabs) {
       state.tabs = tabs;
-      if (state.loaded && !tabs.some((tab) => tab.id === state.current)) state.current = tabs.length ? tabs[0].id : null;
-      renderAll();
+      if (state.loaded && !tabs.some((tab) => tab.id === state.current)) {
+        chooseTab(tabs.length ? tabs[0].id : null);
+      } else {
+        renderAll();
+      }
     }
     $('banner').hidden = true;
   } catch (error) {
@@ -287,13 +341,24 @@ async function refreshTabs() {
   }
 }
 
+// Moves not yet saved win over whatever the server says, so a note doesn't
+// jump back while its new position is on its way.
+function withLocalMoves(ideas) {
+  if (!state.moves.size) return ideas;
+  return ideas.map((idea) => {
+    const move = state.moves.get(idea.number);
+    return move ? { ...idea, x: move.spot.x, y: move.spot.y } : idea;
+  });
+}
+
 async function refreshIdeas() {
   if (state.busy.ideas || !state.store) return;
   state.busy.ideas = true;
   try {
     const ideas = await state.store.listIdeas();
-    if (ideas !== state.ideas) {
-      state.ideas = ideas;
+    if (ideas !== state.serverIdeas) {
+      state.serverIdeas = ideas;
+      state.ideas = withLocalMoves(ideas);
       renderAll();
       if (state.detail != null) renderDetail();
     }
@@ -321,6 +386,8 @@ function stopPolling() {
   state.timers.forEach(clearInterval);
   state.timers = [];
 }
+
+// ---------------------------------------------------------------- rendering
 
 function renderAll() {
   if (!state.session) return;
@@ -357,30 +424,28 @@ function renderTabs() {
 
 function renderBoard() {
   const tab = currentTab();
-  const ideas = tab ? sorted(ideasIn(tab.id)) : [];
+  const ideas = tab ? ideasIn(tab.id) : [];
   $('tab-title').textContent = tab ? tab.name : 'Idea Board';
   $('tab-count').textContent = tab ? plural(ideas.length, 'idea') : '';
   document.title = tab ? `${tab.name} - Idea Board` : 'Idea Board';
   $('new-idea').disabled = !tab;
 
-  const tools = $('admin-tools');
-  tools.hidden = !(state.admin && tab);
+  $('admin-tools').hidden = !(state.admin && tab);
   if (tab) {
     const index = state.tabs.indexOf(tab);
     $('move-up').disabled = index <= 0;
     $('move-down').disabled = index >= state.tabs.length - 1;
   }
 
-  const notes = $('notes');
+  // Never rebuild the notes under someone's finger; catch up when they let go.
+  if (state.drag) state.staleBoard = true;
+  else drawNotes(ideas);
+
   const empty = $('empty');
   if (!state.loaded) {
-    notes.replaceChildren();
     empty.replaceChildren(h('p', { class: 'empty-title' }, 'Loading the board...'));
     empty.hidden = false;
-    return;
-  }
-  if (!tab) {
-    notes.replaceChildren();
+  } else if (!tab) {
     empty.replaceChildren(...(state.admin
       ? [
           h('p', { class: 'empty-title' }, 'Create the first tab'),
@@ -390,32 +455,92 @@ function renderBoard() {
       : [
           h('p', { class: 'empty-title' }, 'No tabs yet'),
           h('p', {}, isAdminName()
-            ? 'Turn on admin tools at the bottom of the sidebar to create the first tab.'
+            ? 'Turn on admin tools at the bottom of the side panel to create the first tab.'
             : "Whoever runs the board hasn't created any tabs yet, so there's nowhere to pin ideas."),
         ]));
     empty.hidden = false;
-    return;
-  }
-  if (!ideas.length) {
-    notes.replaceChildren();
+  } else if (!ideas.length) {
     empty.replaceChildren(
       h('p', { class: 'empty-title' }, `Nothing pinned in ${tab.name} yet`),
-      h('p', {}, 'Post the first idea. Anyone on the team can read it and comment.'),
+      h('p', {}, 'Post the first idea. Anyone on the team can read it, comment, and move it around the board.'),
       h('button', { class: 'btn btn-primary', type: 'button', onclick: () => openIdeaDialog(null) }, 'New idea'),
     );
     empty.hidden = false;
-    return;
+  } else {
+    empty.hidden = true;
   }
-  empty.hidden = true;
-  notes.replaceChildren(...ideas.map(noteElement));
 }
 
-function noteElement(idea) {
-  return h('button', {
+function clampSpot(x, y, height = NOTE.height) {
+  return {
+    x: Math.round(clamp(x, 0, BOARD.width - NOTE.width)),
+    y: Math.round(clamp(y, 0, BOARD.height - Math.max(height, 60))),
+  };
+}
+
+function overlaps(a, b) {
+  return Math.abs(a.x - b.x) < NOTE.width && Math.abs(a.y - b.y) < NOTE.height + 20;
+}
+
+// Notes with a saved position go there. Any without one are laid out in the
+// first free grid slots, in the order they were posted, so everyone sees the
+// same arrangement until somebody moves them.
+function layout(ideas) {
+  const spots = new Map();
+  const taken = [];
+  for (const idea of ideas) {
+    if (idea.x == null || idea.y == null) continue;
+    const spot = clampSpot(idea.x, idea.y);
+    spots.set(idea.number, spot);
+    taken.push(spot);
+  }
+  const columns = Math.floor((BOARD.width - 80) / SLOT.width);
+  const slots = columns * Math.floor((BOARD.height - 80) / SLOT.height);
+  let slot = 0;
+  for (const idea of [...ideas].sort((a, b) => a.number - b.number)) {
+    if (spots.has(idea.number)) continue;
+    let spot = null;
+    while (slot < slots && !spot) {
+      const candidate = { x: 40 + (slot % columns) * SLOT.width, y: 40 + Math.floor(slot / columns) * SLOT.height };
+      slot++;
+      if (!taken.some((other) => overlaps(other, candidate))) spot = candidate;
+    }
+    // A full board stacks the rest near the corner rather than off the edge.
+    if (!spot) spot = clampSpot(40 + (idea.number % 12) * 14, 40 + (idea.number % 12) * 14);
+    spots.set(idea.number, spot);
+    taken.push(spot);
+  }
+  return spots;
+}
+
+function drawNotes(ideas) {
+  const active = document.activeElement;
+  const focused = active && active.classList && active.classList.contains('note') ? active.dataset.number : null;
+  state.spots = layout(ideas);
+  // Most recently touched on top, so a note somebody just moved lands above its neighbours.
+  const order = [...ideas].sort((a, b) => a.updated.localeCompare(b.updated));
+  $('notes').replaceChildren(...order.map((idea) => noteElement(idea, state.spots.get(idea.number))));
+  if (focused) {
+    const again = $('notes').querySelector(`[data-number="${focused}"]`);
+    if (again) again.focus({ preventScroll: true });
+  }
+}
+
+function noteElement(idea, spot) {
+  const el = h('button', {
     type: 'button',
     class: `note note--${idea.color}`,
-    style: `--tilt: ${tilt(idea.number)}deg`,
-    onclick: () => openDetail(idea.number),
+    'data-number': String(idea.number),
+    style: `left: ${spot.x}px; top: ${spot.y}px; --tilt: ${tilt(idea.number)}deg`,
+    onclick: () => {
+      if (state.suppressClick) {
+        state.suppressClick = false;
+        return;
+      }
+      openDetail(idea.number);
+    },
+    onpointerdown: (event) => startNoteDrag(event, idea, el),
+    onkeydown: (event) => nudgeNote(event, idea, el),
   },
   h('span', { class: 'pin', 'aria-hidden': 'true' }),
   h('span', { class: 'note-title' }, idea.title),
@@ -424,6 +549,285 @@ function noteElement(idea) {
     h('span', { class: 'note-author' }, idea.author),
     h('span', {}, ago(idea.created)),
     h('span', { class: 'note-comments' }, idea.comments ? plural(idea.comments, 'comment') : 'No comments')));
+  return el;
+}
+
+// ---------------------------------------------------------------- moving notes
+
+function startNoteDrag(event, idea, el) {
+  if (event.button !== 0 || state.drag || state.pointers.size) return;
+  state.drag = {
+    idea,
+    el,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    from: { x: parseFloat(el.style.left), y: parseFloat(el.style.top) },
+    moved: false,
+    spot: null,
+  };
+  el.setPointerCapture(event.pointerId);
+  el.addEventListener('pointermove', moveNoteDrag);
+  el.addEventListener('pointerup', endNoteDrag);
+  el.addEventListener('pointercancel', endNoteDrag);
+}
+
+function moveNoteDrag(event) {
+  const drag = state.drag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const dx = event.clientX - drag.startX;
+  const dy = event.clientY - drag.startY;
+  // A few pixels of wobble is still a click, which opens the note.
+  if (!drag.moved) {
+    if (Math.hypot(dx, dy) < 5) return;
+    drag.moved = true;
+    drag.el.classList.add('dragging');
+  }
+  const { zoom } = state.view;
+  drag.spot = clampSpot(drag.from.x + dx / zoom, drag.from.y + dy / zoom, drag.el.offsetHeight);
+  drag.el.style.left = `${drag.spot.x}px`;
+  drag.el.style.top = `${drag.spot.y}px`;
+}
+
+function endNoteDrag(event) {
+  const drag = state.drag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const { el } = drag;
+  el.removeEventListener('pointermove', moveNoteDrag);
+  el.removeEventListener('pointerup', endNoteDrag);
+  el.removeEventListener('pointercancel', endNoteDrag);
+  el.classList.remove('dragging');
+  state.drag = null;
+  if (drag.moved && drag.spot) {
+    // The click that follows a drag must not open the note.
+    state.suppressClick = true;
+    setTimeout(() => { state.suppressClick = false; }, 0);
+    queueMove(drag.idea.number, drag.spot);
+  }
+  if (state.staleBoard) {
+    state.staleBoard = false;
+    renderBoard();
+  }
+}
+
+function nudgeNote(event, idea, el) {
+  const steps = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  const step = steps[event.key];
+  if (!step) return;
+  event.preventDefault();
+  const distance = event.shiftKey ? 60 : 12;
+  const spot = clampSpot(
+    parseFloat(el.style.left) + step[0] * distance,
+    parseFloat(el.style.top) + step[1] * distance,
+    el.offsetHeight,
+  );
+  el.style.left = `${spot.x}px`;
+  el.style.top = `${spot.y}px`;
+  queueMove(idea.number, spot);
+  revealNote(el);
+}
+
+// Saves a note's new spot once it has stopped moving, one write at a time
+// per note, so a burst of drags or arrow presses becomes a single edit.
+function queueMove(number, spot) {
+  state.ideas = state.ideas.map((idea) => (idea.number === number ? { ...idea, x: spot.x, y: spot.y } : idea));
+  const entry = state.moves.get(number) || { spot, timer: null, saving: false };
+  entry.spot = spot;
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => saveMove(number), 450);
+  state.moves.set(number, entry);
+}
+
+async function saveMove(number) {
+  const entry = state.moves.get(number);
+  if (!entry) return;
+  if (entry.saving) {
+    entry.timer = setTimeout(() => saveMove(number), 300);
+    return;
+  }
+  if (!state.ideas.some((item) => item.number === number)) {
+    state.moves.delete(number);
+    return;
+  }
+  const { spot } = entry;
+  entry.saving = true;
+  try {
+    await state.store.moveIdea(number, spot.x, spot.y);
+  } catch (error) {
+    toast(`That note's new position wasn't saved. ${error.message}`, true);
+  }
+  entry.saving = false;
+  if (entry.spot === spot) {
+    state.moves.delete(number);
+    refreshIdeas();
+  }
+}
+
+// ---------------------------------------------------------------- zoom and pan
+
+function viewportRect() {
+  return $('viewport').getBoundingClientRect();
+}
+
+// Keeps the board in view: on an axis where the whole board fits it is
+// centred, otherwise its edges can only be pulled PAN_SLACK past the screen's.
+function clampView(view) {
+  const rect = viewportRect();
+  if (!rect.width || !rect.height) return view;
+  view.zoom = clamp(view.zoom, ZOOM.min, ZOOM.max);
+  const fit = (offset, size, room) => (size + PAN_SLACK * 2 <= room
+    ? (room - size) / 2
+    : clamp(offset, room - size - PAN_SLACK, PAN_SLACK));
+  view.x = fit(view.x, BOARD.width * view.zoom, rect.width);
+  view.y = fit(view.y, BOARD.height * view.zoom, rect.height);
+  return view;
+}
+
+let viewSaveTimer = null;
+function applyView() {
+  const { zoom, x, y } = clampView(state.view);
+  $('world').style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
+  $('zoom-level').textContent = `${Math.round(zoom * 100)}%`;
+  $('zoom-out').disabled = zoom <= ZOOM.min + 0.001;
+  $('zoom-in').disabled = zoom >= ZOOM.max - 0.001;
+  if (state.current) {
+    state.views[state.current] = { zoom: Math.round(zoom * 1000) / 1000, x: Math.round(x), y: Math.round(y) };
+    clearTimeout(viewSaveTimer);
+    viewSaveTimer = setTimeout(() => writeStorage('localStorage', VIEW_KEY, state.views), 400);
+  }
+}
+
+// Zooms by `factor` keeping the board point under (cx, cy) where it is.
+function zoomAt(factor, cx, cy) {
+  const view = state.view;
+  const zoom = clamp(view.zoom * factor, ZOOM.min, ZOOM.max);
+  if (zoom === view.zoom) return;
+  view.x = cx - ((cx - view.x) / view.zoom) * zoom;
+  view.y = cy - ((cy - view.y) / view.zoom) * zoom;
+  view.zoom = zoom;
+  applyView();
+}
+
+function zoomFromCentre(factor) {
+  const rect = viewportRect();
+  zoomAt(factor, rect.width / 2, rect.height / 2);
+}
+
+function frame(box, maxZoom) {
+  const rect = viewportRect();
+  if (!rect.width) return;
+  const zoom = clamp(Math.min((rect.width - 48) / box.width, (rect.height - 48) / box.height), ZOOM.min, maxZoom);
+  state.view = {
+    zoom,
+    x: rect.width / 2 - (box.x + box.width / 2) * zoom,
+    y: rect.height / 2 - (box.y + box.height / 2) * zoom,
+  };
+  applyView();
+}
+
+function fitBoard() {
+  frame({ x: 0, y: 0, width: BOARD.width, height: BOARD.height }, ZOOM.max);
+}
+
+function fitNotes() {
+  const spots = [...state.spots.values()];
+  if (!spots.length) {
+    state.view = { zoom: 1, x: 32, y: 32 };
+    applyView();
+    return;
+  }
+  const left = Math.min(...spots.map((s) => s.x));
+  const top = Math.min(...spots.map((s) => s.y));
+  const right = Math.max(...spots.map((s) => s.x)) + NOTE.width;
+  const bottom = Math.max(...spots.map((s) => s.y)) + NOTE.height + 40;
+  frame({ x: left - 40, y: top - 40, width: right - left + 80, height: bottom - top + 80 }, 1);
+}
+
+// Each person's zoom and position is remembered per tab, in their browser.
+function restoreView() {
+  const saved = state.current ? state.views[state.current] : null;
+  if (saved && [saved.zoom, saved.x, saved.y].every(Number.isFinite)) {
+    state.view = { zoom: saved.zoom, x: saved.x, y: saved.y };
+    applyView();
+  } else {
+    fitNotes();
+  }
+}
+
+// The spot at the middle of the screen, where a new note should appear.
+function centreSpot() {
+  const rect = viewportRect();
+  const { zoom, x, y } = state.view;
+  const jitter = () => (Math.random() - 0.5) * 60;
+  return clampSpot(
+    (rect.width / 2 - x) / zoom - NOTE.width / 2 + jitter(),
+    (rect.height / 2 - y) / zoom - NOTE.height / 2 + jitter(),
+  );
+}
+
+function revealNote(note) {
+  const rect = viewportRect();
+  const box = note.getBoundingClientRect();
+  let dx = 0;
+  let dy = 0;
+  if (box.left < rect.left + 16) dx = rect.left + 16 - box.left;
+  else if (box.right > rect.right - 16) dx = rect.right - 16 - box.right;
+  if (box.top < rect.top + 16) dy = rect.top + 16 - box.top;
+  else if (box.bottom > rect.bottom - 16) dy = rect.bottom - 16 - box.bottom;
+  if (dx || dy) {
+    state.view.x += dx;
+    state.view.y += dy;
+    applyView();
+  }
+}
+
+function onWheel(event) {
+  event.preventDefault();
+  if (state.drag) return;
+  const rect = viewportRect();
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
+  // A trackpad pinch arrives as ctrl+wheel with small deltas.
+  const speed = event.ctrlKey ? 0.01 : 0.0015;
+  zoomAt(Math.exp(-event.deltaY * unit * speed), event.clientX - rect.left, event.clientY - rect.top);
+}
+
+function gesture() {
+  const points = [...state.pointers.values()];
+  const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+  const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+  const spread = points.length > 1 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0;
+  return { cx, cy, spread, count: points.length };
+}
+
+function onPanStart(event) {
+  if (event.target.closest('.note, .empty')) return;
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  $('viewport').setPointerCapture(event.pointerId);
+  state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  state.gesture = gesture();
+  $('viewport').classList.add('panning');
+}
+
+function onPanMove(event) {
+  if (!state.pointers.has(event.pointerId)) return;
+  state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  const now = gesture();
+  const before = state.gesture;
+  state.gesture = now;
+  if (!before || before.count !== now.count) return;
+  state.view.x += now.cx - before.cx;
+  state.view.y += now.cy - before.cy;
+  if (now.count > 1 && before.spread > 0) {
+    const rect = viewportRect();
+    zoomAt(now.spread / before.spread, now.cx - rect.left, now.cy - rect.top);
+  }
+  applyView();
+}
+
+function onPanEnd(event) {
+  if (!state.pointers.delete(event.pointerId)) return;
+  state.gesture = state.pointers.size ? gesture() : null;
+  if (!state.pointers.size) $('viewport').classList.remove('panning');
 }
 
 // ---------------------------------------------------------------- ideas
@@ -460,10 +864,15 @@ async function saveIdea(event) {
   await busy($('idea-submit'), editing ? 'Saving...' : 'Pinning...', async () => {
     try {
       if (editing) {
-        const updated = await state.store.updateIdea(editing, { title, text, tab, color });
+        const changes = { title, text, tab, color };
+        // A note moved to another tab finds a free spot on that board.
+        if (tab !== tabOf(editing)) Object.assign(changes, { x: null, y: null });
+        const updated = await state.store.updateIdea(editing, changes);
         state.ideas = state.ideas.map((idea) => (idea.number === updated.number ? updated : idea));
       } else {
-        const idea = await state.store.createIdea({ title, text, tab, color, author: state.session.name });
+        // A new note appears in the middle of whatever part of the board is on screen.
+        const spot = tab === state.current ? centreSpot() : { x: null, y: null };
+        const idea = await state.store.createIdea({ title, text, tab, color, author: state.session.name, ...spot });
         state.ideas = [idea, ...state.ideas];
       }
     } catch (error) {
@@ -796,6 +1205,15 @@ function closeDialogs() {
 }
 
 function wire() {
+  const world = $('world');
+  world.style.width = `${BOARD.width}px`;
+  world.style.height = `${BOARD.height}px`;
+
+  const theme = $('theme');
+  theme.value = savedTheme();
+  theme.addEventListener('change', () => applyTheme(theme.value));
+  $('rail-toggle').addEventListener('click', () => setRail(!$('app').classList.contains('rail-collapsed')));
+
   $('signin-form').addEventListener('submit', signIn);
   $('sign-out').addEventListener('click', signOut);
   $('admin-toggle').addEventListener('click', openAdminDialog);
@@ -812,11 +1230,31 @@ function wire() {
   $('move-down').addEventListener('click', () => moveTab(1));
   $('delete-tab').addEventListener('click', deleteTab);
   $('tab-form').addEventListener('submit', saveTab);
-  $('sort').addEventListener('change', (event) => {
-    state.sort = event.target.value;
-    writeStorage('localStorage', SORT_KEY, state.sort);
-    renderBoard();
+
+  $('zoom-in').addEventListener('click', () => zoomFromCentre(ZOOM.step));
+  $('zoom-out').addEventListener('click', () => zoomFromCentre(1 / ZOOM.step));
+  $('zoom-level').addEventListener('click', () => zoomFromCentre(1 / state.view.zoom));
+  $('zoom-fit').addEventListener('click', fitBoard);
+
+  const viewport = $('viewport');
+  viewport.addEventListener('wheel', onWheel, { passive: false });
+  viewport.addEventListener('pointerdown', onPanStart);
+  viewport.addEventListener('pointermove', onPanMove);
+  viewport.addEventListener('pointerup', onPanEnd);
+  viewport.addEventListener('pointercancel', onPanEnd);
+  // Focus can scroll even an overflow:hidden box, which would knock the
+  // transform out of line with the pointer. Position is the transform's job.
+  viewport.addEventListener('scroll', () => {
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
   });
+  viewport.addEventListener('focusin', (event) => {
+    const note = event.target.closest('.note');
+    if (note && note.matches(':focus-visible')) revealNote(note);
+  });
+  // The viewport changes size when the window does and when the side panel
+  // opens or closes; keep the board inside its limits either way.
+  new ResizeObserver(() => { if (state.session) applyView(); }).observe(viewport);
 
   $('detail').addEventListener('close', () => {
     clearInterval(state.commentTimer);

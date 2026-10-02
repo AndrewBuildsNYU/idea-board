@@ -22,6 +22,10 @@ for (const text of ['plain', '', 'line one\n\nline two', 'has --> arrow', '<!-- 
 }
 assert.deepEqual(parseBody('written on github.com'), { meta: null, text: 'written on github.com' });
 
+const placed = parseBody(encodeBody({ author: 'Ana', tab: 't', color: 'sky', x: 1234, y: 56 }, 'moved'));
+assert.equal(placed.meta.x, 1234);
+assert.equal(placed.meta.y, 56);
+
 assert.deepEqual(parseNames('- Ana\n* ben\n\nAna\n  Cy  Lo  \nDee, Eve'), ['Ana', 'ben', 'Cy Lo', 'Dee', 'Eve']);
 
 console.log('All checks passed.');
