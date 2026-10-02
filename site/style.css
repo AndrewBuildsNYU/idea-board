@@ -161,6 +161,57 @@
   color-scheme: dark;
 }
 
+/* Pens, the string between pins, and group outlines. Light themes first;
+   the dark ones (device dark, Night, Chalkboard) swap in brighter inks so
+   drawing and writing stay readable on a dark board. */
+:root {
+  --font-hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+  --pen-ink: #23201c;
+  --pen-red: #c0392b;
+  --pen-blue: #1f5fae;
+  --pen-green: #2e7d32;
+  --string: #b3312a;
+  --group-blue: #2f6fb0;
+  --group-green: #2f8a57;
+  --group-orange: #b8601a;
+  --group-purple: #7a4fc0;
+  --group-teal: #16808a;
+  --group-ink: #ffffff;
+}
+:root[data-theme="whiteboard"] { --string: #2b5fa8; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --pen-ink: #ece6d8;
+    --pen-red: #ff8a7a;
+    --pen-blue: #8cc4ff;
+    --pen-green: #9fe0a0;
+    --string: #e2675a;
+    --group-blue: #7fb2ec;
+    --group-green: #79c99a;
+    --group-orange: #f0a462;
+    --group-purple: #b79af0;
+    --group-teal: #6fc8cf;
+    --group-ink: #0d1117;
+  }
+}
+:root[data-theme="night"], :root[data-theme="chalk"] {
+  --pen-ink: #ece6d8;
+  --pen-red: #ff8a7a;
+  --pen-blue: #8cc4ff;
+  --pen-green: #9fe0a0;
+  --string: #e2675a;
+  --group-blue: #7fb2ec;
+  --group-green: #79c99a;
+  --group-orange: #f0a462;
+  --group-purple: #b79af0;
+  --group-teal: #6fc8cf;
+  --group-ink: #0d1117;
+}
+:root[data-theme="chalk"] {
+  --pen-ink: #f3f1e8;
+  --string: #f2d27a;
+}
+
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
@@ -406,7 +457,85 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offs
   border-radius: 6px;
   box-shadow: 0 0 0 16px var(--frame), 0 0 0 17px rgb(0 0 0 / 0.25), 0 30px 60px 10px rgb(0 0 0 / 0.3);
 }
-.notes { position: absolute; inset: 0; }
+/* Board layers, bottom to top: group outlines, drawings, strings, text,
+   notes. The layers themselves let presses through to the board (so empty
+   space pans); only the things on them catch the pointer, and each tool
+   decides which of those it wants. */
+.layer { position: absolute; inset: 0; pointer-events: none; }
+svg.layer { overflow: visible; }
+.note, .text-item, .group-tag { pointer-events: auto; }
+.string-hit { pointer-events: stroke; }
+.viewport.mode-draw .note,
+.viewport.mode-draw .text-item,
+.viewport.mode-draw .group-tag,
+.viewport.mode-draw .string-hit,
+.viewport.mode-group .text-item,
+.viewport.mode-group .group-tag,
+.viewport.mode-group .string-hit,
+.viewport.mode-line .text-item,
+.viewport.mode-line .group-tag { pointer-events: none; }
+.viewport.mode-line .note { cursor: crosshair; }
+.viewport.mode-group .note { cursor: pointer; }
+.viewport.mode-draw, .viewport.mode-draw.panning { cursor: crosshair; }
+
+.pen--ink { --pen: var(--pen-ink); }
+.pen--red { --pen: var(--pen-red); }
+.pen--blue { --pen: var(--pen-blue); }
+.pen--green { --pen: var(--pen-green); }
+
+.ink-stroke { fill: none; stroke: var(--pen); stroke-linecap: round; stroke-linejoin: round; }
+
+.string-line {
+  fill: none; stroke: var(--string); stroke-width: 2.5; stroke-linecap: round;
+  filter: drop-shadow(0 1.5px 1px rgb(0 0 0 / 0.3));
+}
+.string-hit { fill: none; stroke: transparent; stroke-width: 18; cursor: pointer; }
+.string:hover .string-line { stroke-width: 4; }
+.string-band { fill: none; stroke: var(--string); stroke-width: 2.5; stroke-dasharray: 8 7; stroke-linecap: round; }
+
+.group {
+  position: absolute;
+  border: 2px dashed var(--gc);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--gc) 10%, transparent);
+}
+.group--blue { --gc: var(--group-blue); }
+.group--green { --gc: var(--group-green); }
+.group--orange { --gc: var(--group-orange); }
+.group--purple { --gc: var(--group-purple); }
+.group--teal { --gc: var(--group-teal); }
+.group-tag {
+  position: absolute; top: 12px; left: 14px;
+  max-width: calc(100% - 28px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 700 1rem/1.2 var(--font-display);
+  color: var(--group-ink); background: var(--gc);
+  border: 0; border-radius: 999px; padding: 6px 14px;
+  box-shadow: var(--shadow-note);
+  cursor: grab;
+}
+.group-tag:active { cursor: grabbing; }
+
+.text-item {
+  position: absolute;
+  width: max-content; max-width: 1000px;
+  padding: 2px 8px;
+  font-family: var(--font-hand); font-weight: 600; line-height: 1.1;
+  color: var(--pen);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  border-radius: 6px;
+  cursor: grab;
+}
+.text-item:hover { outline: 1px dashed color-mix(in srgb, var(--pen) 45%, transparent); }
+.text-item.dragging { cursor: grabbing; }
+.text--s { font-size: 30px; }
+.text--m { font-size: 44px; }
+.text--l { font-size: 68px; }
+.handwriting-input { font-family: var(--font-hand); font-size: 1.8rem; font-weight: 600; line-height: 1.2; color: var(--pen); }
+.pen-fill { background: var(--pen); }
+
+.note.selected { outline: 3px solid var(--accent); outline-offset: 5px; }
+.note.line-start { outline: 3px dashed var(--string); outline-offset: 5px; }
 
 .note {
   position: absolute;
@@ -473,6 +602,66 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offs
 .empty p:not(.empty-title) { color: var(--muted); }
 .empty .btn { margin-top: 6px; }
 
+.modes { display: flex; gap: 2px; padding: 2px; background: var(--field); border: 1px solid var(--line); border-radius: 9px; }
+.mode {
+  font: inherit; font-size: 0.84rem; font-weight: 700;
+  color: var(--muted); background: transparent;
+  border: 0; border-radius: 7px; padding: 6px 11px; cursor: pointer;
+}
+.mode:hover:not(:disabled) { color: var(--ink); }
+.mode[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / 0.18); }
+.mode:disabled { opacity: 0.45; cursor: default; }
+
+.tool-bar {
+  position: absolute; top: 12px; left: 50%; z-index: 3;
+  transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - 24px);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 12px;
+  padding: 8px 10px 8px 16px;
+  background: var(--surface); color: var(--ink);
+  border-radius: 12px; box-shadow: var(--shadow-lift);
+  cursor: default;
+}
+.tool-text { font-weight: 700; font-size: 0.9rem; }
+.tool-bar .btn { padding: 7px 12px; font-size: 0.85rem; }
+.group-form { display: flex; gap: 8px; }
+.group-form input { width: 190px; padding: 7px 10px; }
+.pen-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pen-colors, .pen-sizes { display: flex; gap: 6px; }
+.pen-swatch {
+  width: 28px; height: 28px; padding: 0;
+  border-radius: 50%; border: 2px solid var(--line);
+  background: var(--pen); cursor: pointer;
+}
+.pen-swatch[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 2px var(--surface); }
+.pen-size {
+  width: 32px; height: 32px; padding: 0;
+  display: grid; place-items: center;
+  background: transparent; border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+}
+.pen-size[aria-pressed="true"] { background: var(--field); border-color: var(--ink); }
+.pen-dot { display: block; border-radius: 50%; background: var(--ink); }
+.pen-dot--s { width: 4px; height: 4px; }
+.pen-dot--m { width: 8px; height: 8px; }
+.pen-dot--l { width: 14px; height: 14px; }
+#pen-eraser[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+
+.board-menu {
+  position: absolute; z-index: 4;
+  min-width: 190px;
+  display: flex; flex-direction: column;
+  padding: 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  cursor: default;
+}
+.menu-item {
+  font: inherit; font-size: 0.92rem; font-weight: 700; text-align: left;
+  color: var(--ink); background: transparent;
+  border: 0; border-radius: 7px; padding: 9px 12px; cursor: pointer;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--field); outline: none; }
+
 .viewport-hint {
   position: absolute; left: 12px; bottom: 12px;
   max-width: calc(100% - 24px);
@@ -534,6 +723,11 @@ dialog::backdrop { background: rgb(12 16 22 / 0.55); }
   font-size: 0.85rem; color: var(--note-meta);
 }
 .detail-actions { display: flex; gap: 6px; }
+.detail-group { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 700; color: var(--note-meta); }
+.detail-group select {
+  width: auto; padding: 5px 8px;
+  color: var(--note-ink); background: rgb(255 255 255 / 0.55); border-color: rgb(41 36 29 / 0.25);
+}
 
 .comments { padding: 18px 24px 22px; display: flex; flex-direction: column; gap: 14px; }
 .comments h3 { font-size: 1.05rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }

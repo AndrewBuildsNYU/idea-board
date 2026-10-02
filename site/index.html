@@ -8,7 +8,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500..750&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500..750&family=Caveat:wght@500..700&display=swap">
   <link rel="stylesheet" href="style.css">
   <!-- Not deferred: the saved theme has to be on <html> before the first paint. -->
   <script src="theme.js"></script>
@@ -94,6 +94,12 @@
             <button id="move-down" class="btn btn-quiet" type="button">Move down</button>
             <button id="delete-tab" class="btn btn-quiet btn-quiet-danger" type="button">Delete tab</button>
           </div>
+          <div class="modes" role="group" aria-label="Board tool">
+            <button class="mode" type="button" data-mode="move" aria-pressed="true" title="Move notes and look around">Move</button>
+            <button class="mode" type="button" data-mode="line" aria-pressed="false" title="Draw a line between two ideas">Connect</button>
+            <button class="mode" type="button" data-mode="group" aria-pressed="false" title="Put ideas in a named group">Group</button>
+            <button class="mode" type="button" data-mode="draw" aria-pressed="false" title="Draw on the board">Draw</button>
+          </div>
           <div class="zoom" role="group" aria-label="Zoom">
             <button id="zoom-out" class="btn btn-quiet zoom-step" type="button" aria-label="Zoom out">&minus;</button>
             <button id="zoom-level" class="btn btn-quiet zoom-level" type="button" title="Back to 100%">100%</button>
@@ -107,12 +113,51 @@
       <p id="banner" class="banner" role="alert" hidden></p>
       <div id="viewport" class="viewport">
         <div id="world" class="world cork">
-          <div id="notes" class="notes"></div>
+          <div id="groups" class="layer groups"></div>
+          <svg id="ink" class="layer ink" aria-hidden="true">
+            <g id="ink-strokes"></g>
+            <path id="ink-live" class="ink-stroke" hidden></path>
+          </svg>
+          <svg id="strings" class="layer strings" aria-hidden="true">
+            <g id="string-lines"></g>
+            <path id="string-band" class="string-band" hidden></path>
+          </svg>
+          <div id="texts" class="layer texts"></div>
+          <div id="notes" class="layer notes"></div>
         </div>
         <div id="empty" class="empty" hidden></div>
+        <div id="tool-bar" class="tool-bar" hidden>
+          <p id="tool-text" class="tool-text"></p>
+          <form id="group-form" class="group-form" hidden>
+            <label for="group-name" class="sr-only">Group name</label>
+            <input id="group-name" type="text" maxlength="60" placeholder="Group name" autocomplete="off">
+            <button id="group-create" class="btn btn-primary" type="submit">Make group</button>
+          </form>
+          <div id="pen-tools" class="pen-tools" hidden>
+            <div class="pen-colors" role="group" aria-label="Pen colour">
+              <button class="pen-swatch pen--ink" type="button" data-pen="ink" aria-pressed="true" title="Main colour"><span class="sr-only">Main colour</span></button>
+              <button class="pen-swatch pen--red" type="button" data-pen="red" aria-pressed="false" title="Red"><span class="sr-only">Red</span></button>
+              <button class="pen-swatch pen--blue" type="button" data-pen="blue" aria-pressed="false" title="Blue"><span class="sr-only">Blue</span></button>
+              <button class="pen-swatch pen--green" type="button" data-pen="green" aria-pressed="false" title="Green"><span class="sr-only">Green</span></button>
+            </div>
+            <div class="pen-sizes" role="group" aria-label="Pen size">
+              <button class="pen-size" type="button" data-size="s" aria-pressed="false" title="Fine"><span class="pen-dot pen-dot--s"></span><span class="sr-only">Fine</span></button>
+              <button class="pen-size" type="button" data-size="m" aria-pressed="true" title="Medium"><span class="pen-dot pen-dot--m"></span><span class="sr-only">Medium</span></button>
+              <button class="pen-size" type="button" data-size="l" aria-pressed="false" title="Thick"><span class="pen-dot pen-dot--l"></span><span class="sr-only">Thick</span></button>
+            </div>
+            <button id="pen-eraser" class="btn btn-quiet" type="button" aria-pressed="false">Eraser</button>
+            <button id="pen-undo" class="btn btn-quiet" type="button">Undo</button>
+          </div>
+          <button id="tool-done" class="btn btn-quiet" type="button">Done</button>
+        </div>
+        <div id="board-menu" class="board-menu" role="menu" aria-label="Add to the board" hidden>
+          <button id="menu-idea" class="menu-item" type="button" role="menuitem">New idea here</button>
+          <button id="menu-text" class="menu-item" type="button" role="menuitem">Write text here</button>
+          <button id="menu-draw" class="menu-item" type="button" role="menuitem">Draw</button>
+        </div>
         <p class="viewport-hint" aria-hidden="true">
-          <span class="hint-mouse">Scroll to zoom &middot; drag the board to look around &middot; drag a note to move it</span>
-          <span class="hint-touch">Pinch to zoom &middot; drag to look around &middot; drag a note to move it</span>
+          <span class="hint-mouse">Scroll to zoom &middot; drag to look around &middot; double-click the board to add something</span>
+          <span class="hint-touch">Pinch to zoom &middot; drag to look around &middot; double-tap the board to add something</span>
         </p>
       </div>
     </section>
@@ -167,6 +212,10 @@
         <span id="detail-by"></span>
         <span id="detail-actions" class="detail-actions"></span>
       </div>
+      <div id="detail-group-row" class="detail-group" hidden>
+        <label for="detail-group">Group</label>
+        <select id="detail-group"></select>
+      </div>
     </article>
     <section class="comments" aria-labelledby="comments-heading">
       <h3 id="comments-heading">Comments <span id="comment-count" class="count-pill"></span></h3>
@@ -213,6 +262,62 @@
       <p id="tab-error" class="form-error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="tab-submit" class="btn btn-primary" type="submit">Create tab</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="text-dialog" aria-labelledby="text-dialog-title">
+    <form id="text-form" class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="text-dialog-title">Write on the board</h2>
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+      </div>
+      <div class="field">
+        <label for="text-body">Text</label>
+        <textarea id="text-body" class="handwriting-input" rows="3" maxlength="500" required></textarea>
+      </div>
+      <div class="field-row">
+        <fieldset class="field swatches">
+          <legend>Colour</legend>
+          <div class="swatch-row">
+            <input type="radio" name="text-color" id="text-color-ink" value="ink"><label for="text-color-ink" class="swatch pen-fill pen--ink"><span class="sr-only">Main colour</span></label>
+            <input type="radio" name="text-color" id="text-color-red" value="red"><label for="text-color-red" class="swatch pen-fill pen--red"><span class="sr-only">Red</span></label>
+            <input type="radio" name="text-color" id="text-color-blue" value="blue"><label for="text-color-blue" class="swatch pen-fill pen--blue"><span class="sr-only">Blue</span></label>
+            <input type="radio" name="text-color" id="text-color-green" value="green"><label for="text-color-green" class="swatch pen-fill pen--green"><span class="sr-only">Green</span></label>
+          </div>
+        </fieldset>
+        <div class="field">
+          <label for="text-size">Size</label>
+          <select id="text-size">
+            <option value="s">Small</option>
+            <option value="m">Medium</option>
+            <option value="l">Large</option>
+          </select>
+        </div>
+      </div>
+      <p id="text-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="text-delete" class="btn btn-quiet btn-quiet-danger" type="button" hidden>Erase</button>
+        <button id="text-submit" class="btn btn-primary" type="submit">Write it</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="group-dialog" aria-labelledby="group-dialog-title">
+    <form id="group-edit-form" class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="group-dialog-title">Group</h2>
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+      </div>
+      <div class="field">
+        <label for="group-rename">Group name</label>
+        <input id="group-rename" type="text" maxlength="60" required autocomplete="off">
+      </div>
+      <p class="muted">Drag the group's name on the board to move everything in it. To add or take out an idea, open the idea and pick a group.</p>
+      <p id="group-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="group-ungroup" class="btn btn-quiet btn-quiet-danger" type="button">Ungroup</button>
+        <button id="group-save" class="btn btn-primary" type="submit">Save name</button>
       </div>
     </form>
   </dialog>

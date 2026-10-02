@@ -1,14 +1,19 @@
 // Everything the board reads and writes, through the GitHub REST API.
 //
-// The private data repository is the database:
-//   an idea     = an open issue (title = the idea's title)
-//   a comment   = a comment on that issue
-//   removing    = closing the issue, so nothing is ever destroyed by the board
-//   the tabs    = tabs.json at the repository root
+// The private data repository is the database. Every thing on a board is an
+// issue, told apart by a "type" in a hidden marker at the top of its body:
+//   an idea     (no type)  title = the idea's title, body = its details
+//   a group     "group"    title = the group's name; ideas point at it
+//   board text  "text"     body = the words written on the board
+//   a drawing   "sketch"   body = its pen strokes, one per line
+//   comments    comments on an idea's issue
+//   removing    closes the issue, so nothing is ever destroyed by the board
+//   the tabs    tabs.json at the repository root
+// Lines between ideas are stored on the idea they were drawn from (`links`).
 //
-// Who wrote something is a first name carried in a hidden HTML comment at the
-// top of the issue or comment body, because every write goes through one
-// shared key and GitHub would otherwise credit the key's owner.
+// Who wrote something is a first name in the same marker, because every
+// write goes through one shared key and GitHub would otherwise credit the
+// key's owner.
 //
 // Lists are fetched with If-None-Match. A 304 does not count against
 // GitHub's rate limit, which is what makes polling a shared key affordable.
@@ -26,6 +31,12 @@ const MARK_RE = /^<!-- idea-board:v1 (.*?) -->\r?\n?/s;
 const IN_BROWSER = typeof document !== 'undefined';
 
 export const COLORS = ['yellow', 'pink', 'mint', 'sky', 'lilac'];
+export const GROUP_COLORS = ['blue', 'green', 'orange', 'purple', 'teal'];
+export const PENS = ['ink', 'red', 'blue', 'green'];
+export const TEXT_SIZES = ['s', 'm', 'l'];
+// A stroke is "colour|width|x,y x,y ...". The format is checked on the way in
+// so a hand-edited issue can't break the board.
+const STROKE_RE = /^(ink|red|blue|green)\|\d{1,2}\|-?\d{1,5},-?\d{1,5}( -?\d{1,5},-?\d{1,5})*$/;
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -87,34 +98,77 @@ function validTab(tab) {
   return tab && typeof tab.id === 'string' && /^[a-z0-9-]{1,48}$/.test(tab.id) && typeof tab.name === 'string';
 }
 
-// Where a note sits on its tab's board travels in the same hidden marker, so
-// a move is just an edit and everyone sees the same layout. A note with no
-// position (or one written on github.com) is placed automatically.
-function ideaMeta({ author, tab, color, x, y }) {
-  const meta = { author, tab, color };
-  if (Number.isFinite(x) && Number.isFinite(y)) {
-    meta.x = Math.round(x);
-    meta.y = Math.round(y);
-  }
-  return meta;
+function finite(value) {
+  return Number.isFinite(value) ? Math.round(value) : null;
 }
 
-function toIdea(issue) {
+function firstLine(text, fallback) {
+  const line = String(text || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
+  return (line.length > 80 ? `${line.slice(0, 77)}...` : line) || fallback;
+}
+
+function toItem(issue) {
   const { meta, text } = parseBody(issue.body);
-  const placed = meta && Number.isFinite(meta.x) && Number.isFinite(meta.y);
-  return {
+  const m = meta || {};
+  const base = {
     number: issue.number,
-    title: issue.title,
-    text,
-    author: (meta && typeof meta.author === 'string' && meta.author) || issue.user.login,
-    tab: meta && typeof meta.tab === 'string' ? meta.tab : null,
-    color: meta && COLORS.includes(meta.color) ? meta.color : 'yellow',
-    x: placed ? meta.x : null,
-    y: placed ? meta.y : null,
+    tab: typeof m.tab === 'string' ? m.tab : null,
+    author: (typeof m.author === 'string' && m.author) || issue.user.login,
     created: issue.created_at,
     updated: issue.updated_at,
+  };
+  if (m.type === 'group') {
+    return { ...base, kind: 'group', name: issue.title, color: GROUP_COLORS.includes(m.color) ? m.color : 'blue' };
+  }
+  if (m.type === 'text') {
+    return {
+      ...base,
+      kind: 'text',
+      text,
+      x: finite(m.x) ?? 0,
+      y: finite(m.y) ?? 0,
+      size: TEXT_SIZES.includes(m.size) ? m.size : 'm',
+      color: PENS.includes(m.color) ? m.color : 'ink',
+    };
+  }
+  if (m.type === 'sketch') {
+    return { ...base, kind: 'sketch', strokes: text.split('\n').map((s) => s.trim()).filter((s) => STROKE_RE.test(s)) };
+  }
+  const placed = finite(m.x) != null && finite(m.y) != null;
+  return {
+    ...base,
+    kind: 'idea',
+    title: issue.title,
+    text,
+    color: COLORS.includes(m.color) ? m.color : 'yellow',
+    x: placed ? finite(m.x) : null,
+    y: placed ? finite(m.y) : null,
+    group: Number.isInteger(m.group) ? m.group : null,
+    links: Array.isArray(m.links) ? [...new Set(m.links.filter(Number.isInteger))] : [],
     comments: issue.comments,
   };
+}
+
+// The inverse of toItem: what an item looks like as an issue.
+function encodeItem(item) {
+  if (item.kind === 'group') {
+    return { title: item.name, body: encodeBody({ type: 'group', tab: item.tab, color: item.color }, '') };
+  }
+  if (item.kind === 'text') {
+    const meta = { type: 'text', tab: item.tab, x: finite(item.x) ?? 0, y: finite(item.y) ?? 0, size: item.size, color: item.color, author: item.author };
+    return { title: firstLine(item.text, 'Text on the board'), body: encodeBody(meta, item.text) };
+  }
+  if (item.kind === 'sketch') {
+    return { title: 'Drawing', body: encodeBody({ type: 'sketch', tab: item.tab, author: item.author }, item.strokes.join('\n')) };
+  }
+  const meta = { author: item.author, tab: item.tab, color: item.color };
+  if (finite(item.x) != null && finite(item.y) != null) {
+    meta.x = finite(item.x);
+    meta.y = finite(item.y);
+  }
+  if (Number.isInteger(item.group)) meta.group = item.group;
+  if (item.links && item.links.length) meta.links = item.links;
+  return { title: item.title, body: encodeBody(meta, item.text) };
 }
 
 function toComment(comment) {
@@ -132,19 +186,20 @@ export class Store {
     this.repo = repo;
     this.token = token;
     this.lists = new Map();
-    this.ideaCache = { raw: null, ideas: [] };
-    this.ideaView = { server: null, version: -1, ideas: [] };
+    this.itemCache = { raw: null, items: [] };
+    this.itemView = { server: null, version: -1, items: [] };
     this.commentCache = new Map();
     this.tabCache = { etag: null, value: { tabs: [], sha: null } };
     this.lastTabWrite = null;
     // Writes GitHub's lists may not show yet. A null value means "removed".
-    this.pendingIdeas = new Map(); // issue number -> { idea | null, at }
+    this.pendingItems = new Map(); // issue number -> { item | null, at }
     this.pendingComments = new Map(); // issue number -> Map(comment id -> { comment | null, at })
+    this.queues = new Map(); // issue number -> the patch in flight
     this.version = 0;
   }
 
-  rememberIdea(number, idea) {
-    this.pendingIdeas.set(number, { idea, at: Date.now() });
+  remember(number, item) {
+    this.pendingItems.set(number, { item, at: Date.now() });
     this.version++;
   }
 
@@ -200,62 +255,111 @@ export class Store {
     return items;
   }
 
-  // Returns the same array object when nothing changed, so callers can skip
-  // re-rendering with a plain === check.
-  async listIdeas() {
+  // Everything on every board. Returns the same array object when nothing
+  // changed, so callers can skip re-rendering with a plain === check.
+  async listItems() {
     const raw = await this.listAll(`/repos/${this.repo}/issues?state=open&sort=updated&direction=desc&per_page=100`);
-    if (raw !== this.ideaCache.raw) {
-      this.ideaCache = { raw, ideas: raw.filter((issue) => !issue.pull_request).map(toIdea) };
+    if (raw !== this.itemCache.raw) {
+      this.itemCache = { raw, items: raw.filter((issue) => !issue.pull_request).map(toItem) };
     }
-    const server = this.ideaCache.ideas;
+    const server = this.itemCache.items;
     const now = Date.now();
-    for (const [number, entry] of this.pendingIdeas) {
-      const live = server.find((idea) => idea.number === number);
-      const shown = entry.idea ? Boolean(live) && live.updated >= entry.idea.updated : !live;
+    for (const [number, entry] of this.pendingItems) {
+      const live = server.find((item) => item.number === number);
+      const shown = entry.item ? Boolean(live) && live.updated >= entry.item.updated : !live;
       if (shown || now - entry.at > PENDING_MS) {
-        this.pendingIdeas.delete(number);
+        this.pendingItems.delete(number);
         this.version++;
       }
     }
-    if (this.ideaView.server === server && this.ideaView.version === this.version) return this.ideaView.ideas;
-    const ideas = server.filter((idea) => !this.pendingIdeas.has(idea.number));
-    for (const entry of this.pendingIdeas.values()) if (entry.idea) ideas.push(entry.idea);
-    this.ideaView = { server, version: this.version, ideas };
-    return ideas;
+    if (this.itemView.server === server && this.itemView.version === this.version) return this.itemView.items;
+    const items = server.filter((item) => !this.pendingItems.has(item.number));
+    for (const entry of this.pendingItems.values()) if (entry.item) items.push(entry.item);
+    this.itemView = { server, version: this.version, items };
+    return items;
   }
 
-  async createIdea({ title, text, tab, color, author, x, y }) {
-    const body = encodeBody(ideaMeta({ author, tab, color, x, y }), text);
+  async createItem(item) {
+    const { title, body } = encodeItem(item);
     const { data } = await this.request('POST', `/repos/${this.repo}/issues`, { body: { title, body } });
-    const idea = toIdea(data);
-    this.rememberIdea(idea.number, idea);
-    return idea;
+    const created = toItem(data);
+    this.remember(created.number, created);
+    return created;
   }
 
-  // `changes` is any subset of title, text, tab, color, x, y; the rest is kept.
-  async updateIdea(idea, changes) {
-    const next = { ...idea, ...changes };
-    const body = encodeBody(ideaMeta(next), next.text);
-    const { data } = await this.request('PATCH', `/repos/${this.repo}/issues/${idea.number}`, {
-      body: { title: next.title, body },
-    });
-    const updated = toIdea(data);
-    this.rememberIdea(updated.number, updated);
+  // `changes` is any subset of the item's fields; the rest is kept.
+  async updateItem(item, changes) {
+    const { title, body } = encodeItem({ ...item, ...changes });
+    const { data } = await this.request('PATCH', `/repos/${this.repo}/issues/${item.number}`, { body: { title, body } });
+    const updated = toItem(data);
+    this.remember(updated.number, updated);
     return updated;
   }
 
-  // Moving rewrites only the position. It reads the issue first so that a
-  // move never puts back an older title or text over somebody's edit.
-  async moveIdea(number, x, y) {
-    const { data: issue } = await this.request('GET', `/repos/${this.repo}/issues/${number}`);
-    return this.updateIdea(toIdea(issue), { x, y });
+  // Reads the issue first and changes only what `change` returns, so a move,
+  // a new line or a regroup never puts back an older title or text over
+  // somebody else's edit. `change` may be an object or a function of the
+  // current item; returning null means "nothing to do".
+  //
+  // Patches to one issue run one at a time: two at once would both read the
+  // same version, and the second write would undo the first.
+  patchItem(number, change) {
+    const run = async () => {
+      const { data } = await this.request('GET', `/repos/${this.repo}/issues/${number}`);
+      const item = toItem(data);
+      const changes = typeof change === 'function' ? change(item) : change;
+      return changes ? this.updateItem(item, changes) : item;
+    };
+    const next = (this.queues.get(number) || Promise.resolve()).then(run, run);
+    this.queues.set(number, next);
+    const settle = () => { if (this.queues.get(number) === next) this.queues.delete(number); };
+    next.then(settle, settle);
+    return next;
   }
 
-  async removeIdea(number) {
+  async removeItem(number) {
     await this.request('PATCH', `/repos/${this.repo}/issues/${number}`, {
       body: { state: 'closed', state_reason: 'not_planned' },
     });
-    this.rememberIdea(number, null);
+    this.remember(number, null);
+  }
+
+  createIdea(fields) {
+    return this.createItem({ kind: 'idea', group: null, links: [], ...fields });
+  }
+
+  updateIdea(idea, changes) {
+    return this.patchItem(idea.number, changes);
+  }
+
+  moveItem(number, x, y) {
+    return this.patchItem(number, { x, y });
+  }
+
+  removeIdea(number) {
+    return this.removeItem(number);
+  }
+
+  addLink(from, to) {
+    return this.patchItem(from, (idea) => (idea.links.includes(to) ? null : { links: [...idea.links, to] }));
+  }
+
+  // A line may have been drawn from either end, so both ends are checked.
+  async removeLink(a, b) {
+    await this.patchItem(a, (idea) => (idea.links.includes(b) ? { links: idea.links.filter((n) => n !== b) } : null));
+    await this.patchItem(b, (idea) => (idea.links.includes(a) ? { links: idea.links.filter((n) => n !== a) } : null));
+  }
+
+  setGroup(number, group) {
+    return this.patchItem(number, { group });
+  }
+
+  // Strokes are matched by content, which survives other strokes being
+  // added or erased in the meantime.
+  async eraseStroke(number, line) {
+    const sketch = await this.patchItem(number, (item) => (
+      item.strokes.includes(line) ? { strokes: item.strokes.filter((s) => s !== line) } : null));
+    if (!sketch.strokes.length) await this.removeItem(number);
   }
 
   async listComments(number) {
@@ -342,3 +446,6 @@ export class Store {
     return this.tabCache.value;
   }
 }
+
+// Exported for scripts/check.mjs.
+export const _internal = { toItem, encodeItem, STROKE_RE };
