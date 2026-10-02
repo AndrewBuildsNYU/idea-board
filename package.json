@@ -1,0 +1,11 @@
+{
+  "name": "idea-board",
+  "private": true,
+  "type": "module",
+  "description": "A team pin board for ideas and comments, hosted entirely on GitHub.",
+  "license": "MIT",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "build": "node scripts/build.mjs"
+  }
+}

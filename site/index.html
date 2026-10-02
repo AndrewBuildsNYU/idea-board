@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Idea Board</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500..750&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body class="cork">
+
+  <main id="signin" class="signin">
+    <div class="signin-card">
+      <span class="pin" aria-hidden="true"></span>
+      <h1 class="signin-title">Idea Board</h1>
+      <p class="signin-lede">Pin an idea, read what the team is thinking, and talk it through.</p>
+
+      <form id="signin-form" class="stack" hidden>
+        <div class="field">
+          <label for="signin-name">First name</label>
+          <input id="signin-name" type="text" autocomplete="given-name" autocapitalize="words" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label for="signin-password">Team password</label>
+          <input id="signin-password" type="password" autocomplete="current-password" required>
+        </div>
+        <p id="signin-error" class="form-error" role="alert" hidden></p>
+        <button id="signin-submit" class="btn btn-primary btn-wide" type="submit">Sign in</button>
+      </form>
+
+      <p id="signin-note" class="signin-note">Loading...</p>
+    </div>
+  </main>
+
+  <div id="app" class="app" hidden>
+    <aside class="rail">
+      <div class="brand"><span class="brand-pin" aria-hidden="true"></span>Idea Board</div>
+
+      <div class="rail-tabs">
+        <p class="rail-label" id="tabs-label">Tabs</p>
+        <nav id="tab-list" class="tab-list" aria-labelledby="tabs-label"></nav>
+        <button id="new-tab" class="rail-add" type="button" hidden>+ New tab</button>
+      </div>
+
+      <div class="rail-foot">
+        <div class="who">
+          <span id="who-initial" class="who-initial" aria-hidden="true"></span>
+          <span class="who-text">
+            <strong id="who-name"></strong>
+            <span id="who-role" class="who-role"></span>
+          </span>
+        </div>
+        <div class="rail-actions">
+          <button id="admin-toggle" class="rail-btn" type="button" hidden>Admin</button>
+          <button id="sign-out" class="rail-btn" type="button">Sign out</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="board" aria-labelledby="tab-title">
+      <header class="board-head">
+        <div class="head-title">
+          <h1 id="tab-title">Idea Board</h1>
+          <p id="tab-count" class="tab-count-line"></p>
+        </div>
+        <div class="head-tools">
+          <div id="admin-tools" class="admin-tools" hidden>
+            <button id="rename-tab" class="btn btn-quiet" type="button">Rename</button>
+            <button id="move-up" class="btn btn-quiet" type="button">Move up</button>
+            <button id="move-down" class="btn btn-quiet" type="button">Move down</button>
+            <button id="delete-tab" class="btn btn-quiet btn-quiet-danger" type="button">Delete tab</button>
+          </div>
+          <label class="sort">
+            <span>Sort</span>
+            <select id="sort">
+              <option value="new">Newest</option>
+              <option value="active">Recently active</option>
+              <option value="discussed">Most discussed</option>
+            </select>
+          </label>
+          <button id="new-idea" class="btn btn-primary" type="button">New idea</button>
+        </div>
+      </header>
+
+      <p id="banner" class="banner" role="alert" hidden></p>
+      <div id="notes" class="notes"></div>
+      <div id="empty" class="empty" hidden></div>
+    </section>
+  </div>
+
+  <dialog id="idea-dialog" aria-labelledby="idea-dialog-title">
+    <form id="idea-form" class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="idea-dialog-title">New idea</h2>
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+      </div>
+      <div class="field">
+        <label for="idea-title">Title</label>
+        <input id="idea-title" type="text" maxlength="120" required>
+      </div>
+      <div class="field">
+        <label for="idea-text">Details <span class="optional">optional</span></label>
+        <textarea id="idea-text" rows="6" maxlength="4000"></textarea>
+      </div>
+      <div class="field-row">
+        <fieldset class="field swatches">
+          <legend>Note colour</legend>
+          <div class="swatch-row">
+            <input type="radio" name="idea-color" id="color-yellow" value="yellow"><label for="color-yellow" class="swatch note--yellow"><span class="sr-only">Yellow</span></label>
+            <input type="radio" name="idea-color" id="color-pink" value="pink"><label for="color-pink" class="swatch note--pink"><span class="sr-only">Pink</span></label>
+            <input type="radio" name="idea-color" id="color-mint" value="mint"><label for="color-mint" class="swatch note--mint"><span class="sr-only">Mint</span></label>
+            <input type="radio" name="idea-color" id="color-sky" value="sky"><label for="color-sky" class="swatch note--sky"><span class="sr-only">Sky blue</span></label>
+            <input type="radio" name="idea-color" id="color-lilac" value="lilac"><label for="color-lilac" class="swatch note--lilac"><span class="sr-only">Lilac</span></label>
+          </div>
+        </fieldset>
+        <div class="field">
+          <label for="idea-tab">Tab</label>
+          <select id="idea-tab"></select>
+        </div>
+      </div>
+      <p id="idea-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="idea-submit" class="btn btn-primary" type="submit">Pin idea</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="detail" class="detail-dialog" aria-labelledby="detail-title">
+    <article id="detail-note" class="detail-note note--yellow">
+      <div class="detail-top">
+        <span id="detail-tab" class="chip"></span>
+        <button class="btn btn-quiet btn-on-note" type="button" data-close>Close</button>
+      </div>
+      <h2 id="detail-title"></h2>
+      <p id="detail-text" class="detail-text"></p>
+      <div class="detail-meta">
+        <span id="detail-by"></span>
+        <span id="detail-actions" class="detail-actions"></span>
+      </div>
+    </article>
+    <section class="comments" aria-labelledby="comments-heading">
+      <h3 id="comments-heading">Comments <span id="comment-count" class="count-pill"></span></h3>
+      <ol id="comment-list" class="comment-list"></ol>
+      <form id="comment-form" class="comment-form">
+        <label for="comment-text" class="sr-only">Add a comment</label>
+        <textarea id="comment-text" rows="3" maxlength="4000" placeholder="Add a comment"></textarea>
+        <div class="comment-form-row">
+          <span class="hint">Ctrl + Enter posts</span>
+          <button id="comment-submit" class="btn btn-primary" type="submit">Comment</button>
+        </div>
+      </form>
+    </section>
+  </dialog>
+
+  <dialog id="admin-dialog" aria-labelledby="admin-dialog-title">
+    <form id="admin-form" class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="admin-dialog-title">Turn on admin tools</h2>
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+      </div>
+      <p class="muted">Admin tools let you create, rename, reorder and delete tabs, and remove anyone's idea or comment.</p>
+      <div class="field">
+        <label for="admin-password">Admin password</label>
+        <input id="admin-password" type="password" autocomplete="off" required>
+      </div>
+      <p id="admin-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="admin-submit" class="btn btn-primary" type="submit">Turn on</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="tab-dialog" aria-labelledby="tab-dialog-title">
+    <form id="tab-form" class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="tab-dialog-title">New tab</h2>
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+      </div>
+      <div class="field">
+        <label for="tab-name">Tab name</label>
+        <input id="tab-name" type="text" maxlength="40" required>
+      </div>
+      <p id="tab-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="tab-submit" class="btn btn-primary" type="submit">Create tab</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body" class="muted"></p>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" value="cancel">Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger" value="ok"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

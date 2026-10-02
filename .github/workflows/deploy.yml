@@ -1,0 +1,58 @@
+name: Deploy board
+
+# Runs on every push to main, and on demand. The access-list workflow in the
+# private data repository also starts it after copying new names into the
+# ALLOWED_NAMES secret.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check
+        run: node scripts/check.mjs
+
+      - name: Build and seal the keys
+        run: node scripts/build.mjs
+        env:
+          BOARD_PASSWORD: ${{ secrets.BOARD_PASSWORD }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ADMIN_NAME: ${{ secrets.ADMIN_NAME }}
+          ALLOWED_NAMES: ${{ secrets.ALLOWED_NAMES }}
+          MEMBER_TOKEN: ${{ secrets.MEMBER_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
