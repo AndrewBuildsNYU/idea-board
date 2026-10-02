@@ -6,7 +6,8 @@
 // appends strings as text nodes). Nothing here ever assigns innerHTML.
 
 import { open as openVault } from './vault.js';
-import { Store, COLORS, GROUP_COLORS, PENS } from './store.js';
+import { Store, COLORS, GROUP_COLORS, PENS, STRING_COLORS } from './store.js';
+import { renderView, buildNotesPdf } from './exporter.js';
 
 const KEYS = {
   session: 'idea-board:session',
@@ -15,6 +16,7 @@ const KEYS = {
   views: 'idea-board:views',
   rail: 'idea-board:rail',
   pen: 'idea-board:pen',
+  string: 'idea-board:string',
 };
 const POLL = { items: 15000, tabs: 60000, comments: 10000 };
 
@@ -68,6 +70,8 @@ const state = {
   selected: new Set(),
   lineStart: null,
   pen: { color: 'ink', size: 'm' },
+  stringColor: 'default',
+  editingLine: null,
   eraser: false,
   draft: null,
   liveStroke: null,
@@ -289,6 +293,8 @@ async function boot() {
   if (typeof state.views !== 'object' || Array.isArray(state.views)) state.views = {};
   const pen = readStorage('localStorage', KEYS.pen);
   if (pen && PENS.includes(pen.color) && PEN_WIDTHS[pen.size]) state.pen = { color: pen.color, size: pen.size };
+  const string = readStorage('localStorage', KEYS.string);
+  if (STRING_COLORS.includes(string)) state.stringColor = string;
   wire();
   try {
     const res = await fetch('vault.json', { cache: 'no-cache' });
@@ -756,14 +762,14 @@ function drawStrings() {
   const seen = new Set();
   const lines = [];
   for (const idea of ideasIn(state.current)) {
-    for (const to of idea.links) {
+    for (const { to, color } of idea.links || []) {
       const key = idea.number < to ? `${idea.number}-${to}` : `${to}-${idea.number}`;
       if (seen.has(key) || !els.has(idea.number) || !els.has(to)) continue;
       seen.add(key);
       const d = sagPath(pinPoint(els.get(idea.number)), pinPoint(els.get(to)));
       const hit = svg('path', { d, class: 'string-hit' });
-      hit.addEventListener('click', () => removeLine(idea.number, to));
-      const g = svg('g', { class: 'string' });
+      hit.addEventListener('click', () => openLineDialog(idea.number, to));
+      const g = svg('g', { class: `string string--${color}` });
       g.append(svg('path', { d, class: 'string-line' }), hit);
       lines.push(g);
     }
@@ -1228,43 +1234,191 @@ function endLinkDrag(event) {
   }
 }
 
+function linkBetween(a, b) {
+  const one = findItem(a);
+  const two = findItem(b);
+  return (one && one.links.find((link) => link.to === b)) || (two && two.links.find((link) => link.to === a)) || null;
+}
+
 async function connect(from, to) {
   const a = findItem(from);
-  const b = findItem(to);
-  if (!a || !b) return;
-  if (a.links.includes(to) || b.links.includes(from)) {
+  if (!a || !findItem(to)) return;
+  if (linkBetween(from, to)) {
     toast('Those two ideas are already connected.');
     return;
   }
-  patchLocal(from, { links: [...a.links, to] });
+  const color = state.stringColor;
+  patchLocal(from, { links: [...a.links, { to, color }] });
   drawStrings();
   try {
-    await state.store.addLink(from, to);
+    await state.store.addLink(from, to, color);
   } catch (error) {
     toast(`That line wasn't saved. ${error.message}`, true);
   }
   refreshItems();
 }
 
-async function removeLine(a, b) {
+function openLineDialog(a, b) {
   if (state.mode !== 'move' && state.mode !== 'line') return;
+  const link = linkBetween(a, b);
+  if (!link) return;
   const one = findItem(a);
   const two = findItem(b);
-  const ok = await confirmAction({
-    title: 'Remove this line?',
-    body: one && two ? `It connects "${one.title}" and "${two.title}". The ideas stay.` : 'The ideas stay.',
-    action: 'Remove line',
-  });
-  if (!ok) return;
-  if (one) patchLocal(a, { links: one.links.filter((n) => n !== b) });
-  if (two) patchLocal(b, { links: two.links.filter((n) => n !== a) });
+  state.editingLine = { a, b };
+  $('line-between').textContent = one && two ? `Between "${one.title}" and "${two.title}".` : '';
+  $(`line-color-${link.color}`).checked = true;
+  $('line-dialog').showModal();
+}
+
+async function recolourLine(color) {
+  const line = state.editingLine;
+  if (!line) return;
+  const { a, b } = line;
+  for (const [from, to] of [[a, b], [b, a]]) {
+    const idea = findItem(from);
+    if (idea && idea.links.some((link) => link.to === to)) {
+      patchLocal(from, { links: idea.links.map((link) => (link.to === to ? { ...link, color } : link)) });
+    }
+  }
   drawStrings();
+  try {
+    await state.store.setLinkColor(a, b, color);
+  } catch (error) {
+    toast(`The new colour wasn't saved. ${error.message}`, true);
+  }
+  refreshItems();
+}
+
+async function removeLine() {
+  const line = state.editingLine;
+  if (!line) return;
+  const { a, b } = line;
+  $('line-dialog').close();
+  for (const [from, to] of [[a, b], [b, a]]) {
+    const idea = findItem(from);
+    if (idea) patchLocal(from, { links: idea.links.filter((link) => link.to !== to) });
+  }
+  drawStrings();
+  toast('Line removed.');
   try {
     await state.store.removeLink(a, b);
   } catch (error) {
     toast(`That line wasn't removed. ${error.message}`, true);
   }
   refreshItems();
+}
+
+function setStringColor(color) {
+  state.stringColor = color;
+  writeStorage('localStorage', KEYS.string, color);
+  renderToolBar();
+}
+
+// ---------------------------------------------------------------- downloads
+
+function fileStamp() {
+  const d = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}`;
+}
+
+function fileSlug(text) {
+  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'board';
+}
+
+function saveFile(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = h('a', { href: url, download: name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function toggleDownloadMenu(open) {
+  const menu = $('download-menu');
+  const show = open ?? menu.hidden;
+  menu.hidden = !show;
+  $('download-btn').setAttribute('aria-expanded', show ? 'true' : 'false');
+  if (show) $('download-png').focus({ preventScroll: true });
+}
+
+async function downloadPicture() {
+  toggleDownloadMenu(false);
+  const tab = currentTab();
+  if (!tab) return;
+  try {
+    const canvas = await renderView({ viewport: $('viewport'), world: $('world'), view: state.view, board: BOARD });
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('The browser could not encode it.'))), 'image/png');
+    });
+    saveFile(blob, `idea-board-${fileSlug(tab.name)}-${fileStamp()}.png`);
+    toast(`Saved a ${canvas.width} x ${canvas.height} picture of this view.`);
+  } catch (error) {
+    toast(`The picture couldn't be made. ${error.message}`, true);
+  }
+}
+
+// jsPDF is ours, served from /vendor, and only fetched the first time
+// somebody asks for a PDF.
+let jsPdfLoading = null;
+function loadJsPdf() {
+  if (window.jspdf) return Promise.resolve(window.jspdf.jsPDF);
+  jsPdfLoading = jsPdfLoading || new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'vendor/jspdf.umd.min.js';
+    script.onload = () => (window.jspdf ? resolve(window.jspdf.jsPDF) : reject(new Error('The PDF maker did not start.')));
+    script.onerror = () => {
+      jsPdfLoading = null;
+      script.remove();
+      reject(new Error('The PDF maker could not be loaded. Check your connection.'));
+    };
+    document.head.append(script);
+  });
+  return jsPdfLoading;
+}
+
+async function downloadNotes() {
+  toggleDownloadMenu(false);
+  const button = $('download-btn');
+  if (button.getAttribute('aria-busy') === 'true') return;
+  const label = button.textContent;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = 'Preparing...';
+  try {
+    const jsPDF = await loadJsPdf();
+    // Every idea's thread, a few at a time.
+    const ideas = [...state.ideas];
+    const comments = new Map();
+    const queue = [...ideas];
+    let done = 0;
+    const worker = async () => {
+      while (queue.length) {
+        const idea = queue.shift();
+        comments.set(idea.number, await state.store.listComments(idea.number));
+        done++;
+        button.textContent = `Comments ${done} of ${ideas.length}`;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, ideas.length) }, worker));
+    const doc = buildNotesPdf(jsPDF, {
+      tabs: state.tabs,
+      ideas,
+      groups: state.groups,
+      texts: state.texts,
+      sketches: state.sketches,
+      comments,
+      tabOf,
+      exportedBy: state.session.name,
+    });
+    saveFile(doc.output('blob'), `idea-board-notes-${fileStamp()}.pdf`);
+    toast('Saved every note and comment as a PDF.');
+  } catch (error) {
+    toast(`The PDF couldn't be made. ${error.message}`, true);
+  } finally {
+    button.removeAttribute('aria-busy');
+    button.textContent = label;
+  }
 }
 
 // ---------------------------------------------------------------- groups
@@ -1477,6 +1631,10 @@ function renderToolBar() {
   $('tool-bar').hidden = mode === 'move';
   $('group-form').hidden = mode !== 'group';
   $('pen-tools').hidden = mode !== 'draw';
+  $('line-tools').hidden = mode !== 'line';
+  for (const button of document.querySelectorAll('[data-string]')) {
+    button.setAttribute('aria-pressed', button.dataset.string === state.stringColor ? 'true' : 'false');
+  }
   let text = '';
   if (mode === 'line') {
     text = state.lineStart != null
@@ -2258,6 +2416,17 @@ function wire() {
   });
   $('pen-undo').addEventListener('click', undoStroke);
 
+  for (const button of document.querySelectorAll('[data-string]')) {
+    button.addEventListener('click', () => setStringColor(button.dataset.string));
+  }
+  for (const radio of document.querySelectorAll('input[name="line-color"]')) {
+    radio.addEventListener('change', () => recolourLine(radio.value));
+  }
+  $('line-remove').addEventListener('click', removeLine);
+  $('download-btn').addEventListener('click', () => toggleDownloadMenu());
+  $('download-png').addEventListener('click', downloadPicture);
+  $('download-pdf').addEventListener('click', downloadNotes);
+
   $('menu-idea').addEventListener('click', () => menuAction('idea'));
   $('menu-text').addEventListener('click', () => menuAction('text'));
   $('menu-draw').addEventListener('click', () => menuAction('draw'));
@@ -2294,11 +2463,13 @@ function wire() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
-    if (!$('board-menu').hidden) closeMenu();
+    if (!$('download-menu').hidden) toggleDownloadMenu(false);
+    else if (!$('board-menu').hidden) closeMenu();
     else if (state.mode !== 'move') setMode('move');
   });
   document.addEventListener('pointerdown', (event) => {
-    if (!event.target.closest('.board-menu')) closeMenu();
+    if (!event.target.closest('#board-menu')) closeMenu();
+    if (!event.target.closest('.download')) toggleDownloadMenu(false);
   }, true);
 
   $('detail').addEventListener('close', () => {

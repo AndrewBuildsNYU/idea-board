@@ -30,10 +30,16 @@ function roundTrip(item) {
   return toItem({ number: 7, title, body, user: { login: 'owner' }, created_at: 't0', updated_at: 't1', comments: 2 });
 }
 
-const idea = roundTrip({ kind: 'idea', title: 'Demo day', text: 'Fridays', author: 'Ana', tab: 'general', color: 'sky', x: 1234, y: 56, group: 9, links: [3, 4] });
+const links = [{ to: 3, color: 'default' }, { to: 4, color: 'green' }];
+const idea = roundTrip({ kind: 'idea', title: 'Demo day', text: 'Fridays', author: 'Ana', tab: 'general', color: 'sky', x: 1234, y: 56, group: 9, links });
 assert.equal(idea.kind, 'idea');
 assert.deepEqual([idea.title, idea.text, idea.author, idea.color, idea.x, idea.y, idea.group], ['Demo day', 'Fridays', 'Ana', 'sky', 1234, 56, 9]);
-assert.deepEqual(idea.links, [3, 4]);
+assert.deepEqual(idea.links, links);
+// Lines saved before colours existed are plain numbers; they read as the theme colour.
+const older = toItem({ number: 9, title: 'Old', body: encodeBody({ author: 'Ana', links: [3, 3, 5, 'x'] }, ''), user: { login: 'o' }, created_at: 't', updated_at: 't' });
+assert.deepEqual(older.links, [{ to: 3, color: 'default' }, { to: 5, color: 'default' }]);
+// The default colour is stored compactly, so old and new boards read each other.
+assert.deepEqual(parseBody(encodeItem({ kind: 'idea', title: 'T', text: '', author: 'A', links }).body).meta.links, [3, { to: 4, color: 'green' }]);
 
 const loose = roundTrip({ kind: 'idea', title: 'Unplaced', text: '', author: 'Ana', tab: 't', color: 'pink', x: null, y: null, group: null, links: [] });
 assert.equal(loose.x, null);

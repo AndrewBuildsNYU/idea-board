@@ -106,6 +106,13 @@
             <button id="zoom-in" class="btn btn-quiet zoom-step" type="button" aria-label="Zoom in">+</button>
             <button id="zoom-fit" class="btn btn-quiet" type="button" title="Show the whole board">Fit</button>
           </div>
+          <div class="download">
+            <button id="download-btn" class="btn btn-quiet" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="download-menu">Download</button>
+            <div id="download-menu" class="board-menu download-menu" role="menu" aria-label="Download" hidden>
+              <button id="download-png" class="menu-item" type="button" role="menuitem">This view as a picture<span class="menu-sub">PNG of exactly what's on your screen</span></button>
+              <button id="download-pdf" class="menu-item" type="button" role="menuitem">All notes and comments<span class="menu-sub">PDF of every tab</span></button>
+            </div>
+          </div>
           <button id="new-idea" class="btn btn-primary" type="button">New idea</button>
         </div>
       </header>
@@ -133,6 +140,14 @@
             <input id="group-name" type="text" maxlength="60" placeholder="Group name" autocomplete="off">
             <button id="group-create" class="btn btn-primary" type="submit">Make group</button>
           </form>
+          <div id="line-tools" class="pen-colors" role="group" aria-label="String colour for new lines" hidden>
+            <button class="pen-swatch sc-fill string--default" type="button" data-string="default" title="Theme colour"><span class="sr-only">Theme colour</span></button>
+            <button class="pen-swatch sc-fill string--red" type="button" data-string="red" title="Red"><span class="sr-only">Red</span></button>
+            <button class="pen-swatch sc-fill string--blue" type="button" data-string="blue" title="Blue"><span class="sr-only">Blue</span></button>
+            <button class="pen-swatch sc-fill string--green" type="button" data-string="green" title="Green"><span class="sr-only">Green</span></button>
+            <button class="pen-swatch sc-fill string--orange" type="button" data-string="orange" title="Orange"><span class="sr-only">Orange</span></button>
+            <button class="pen-swatch sc-fill string--purple" type="button" data-string="purple" title="Purple"><span class="sr-only">Purple</span></button>
+          </div>
           <div id="pen-tools" class="pen-tools" hidden>
             <div class="pen-colors" role="group" aria-label="Pen colour">
               <button class="pen-swatch pen--ink" type="button" data-pen="ink" aria-pressed="true" title="Main colour"><span class="sr-only">Main colour</span></button>
@@ -301,6 +316,31 @@
         <button id="text-submit" class="btn btn-primary" type="submit">Write it</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="line-dialog" aria-labelledby="line-dialog-title">
+    <div class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="line-dialog-title">Line</h2>
+        <button class="btn btn-quiet" type="button" data-close>Close</button>
+      </div>
+      <p id="line-between" class="muted"></p>
+      <fieldset class="field swatches">
+        <legend>String colour</legend>
+        <div class="swatch-row">
+          <input type="radio" name="line-color" id="line-color-default" value="default"><label for="line-color-default" class="swatch sc-fill string--default"><span class="sr-only">Theme colour</span></label>
+          <input type="radio" name="line-color" id="line-color-red" value="red"><label for="line-color-red" class="swatch sc-fill string--red"><span class="sr-only">Red</span></label>
+          <input type="radio" name="line-color" id="line-color-blue" value="blue"><label for="line-color-blue" class="swatch sc-fill string--blue"><span class="sr-only">Blue</span></label>
+          <input type="radio" name="line-color" id="line-color-green" value="green"><label for="line-color-green" class="swatch sc-fill string--green"><span class="sr-only">Green</span></label>
+          <input type="radio" name="line-color" id="line-color-orange" value="orange"><label for="line-color-orange" class="swatch sc-fill string--orange"><span class="sr-only">Orange</span></label>
+          <input type="radio" name="line-color" id="line-color-purple" value="purple"><label for="line-color-purple" class="swatch sc-fill string--purple"><span class="sr-only">Purple</span></label>
+        </div>
+      </fieldset>
+      <div class="dialog-actions">
+        <button id="line-remove" class="btn btn-quiet btn-quiet-danger" type="button">Remove line</button>
+        <button class="btn btn-primary" type="button" data-close>Done</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="group-dialog" aria-labelledby="group-dialog-title">

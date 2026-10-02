@@ -34,6 +34,8 @@ export const COLORS = ['yellow', 'pink', 'mint', 'sky', 'lilac'];
 export const GROUP_COLORS = ['blue', 'green', 'orange', 'purple', 'teal'];
 export const PENS = ['ink', 'red', 'blue', 'green'];
 export const TEXT_SIZES = ['s', 'm', 'l'];
+// "default" follows the theme (red yarn on cork, blue on whiteboard...).
+export const STRING_COLORS = ['default', 'red', 'blue', 'green', 'orange', 'purple'];
 // A stroke is "colour|width|x,y x,y ...". The format is checked on the way in
 // so a hand-edited issue can't break the board.
 const STROKE_RE = /^(ink|red|blue|green)\|\d{1,2}\|-?\d{1,5},-?\d{1,5}( -?\d{1,5},-?\d{1,5})*$/;
@@ -102,6 +104,23 @@ function finite(value) {
   return Number.isFinite(value) ? Math.round(value) : null;
 }
 
+// A line is stored on the idea it was drawn from, as the other idea's number,
+// or { to, color } once it has a colour other than the default.
+function readLinks(raw) {
+  const links = [];
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const to = Number.isInteger(entry) ? entry : entry && Number.isInteger(entry.to) ? entry.to : null;
+    if (to == null || links.some((link) => link.to === to)) continue;
+    const color = entry && STRING_COLORS.includes(entry.color) ? entry.color : 'default';
+    links.push({ to, color });
+  }
+  return links;
+}
+
+function writeLinks(links) {
+  return links.map((link) => (link.color && link.color !== 'default' ? { to: link.to, color: link.color } : link.to));
+}
+
 function firstLine(text, fallback) {
   const line = String(text || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
   return (line.length > 80 ? `${line.slice(0, 77)}...` : line) || fallback;
@@ -144,7 +163,7 @@ function toItem(issue) {
     x: placed ? finite(m.x) : null,
     y: placed ? finite(m.y) : null,
     group: Number.isInteger(m.group) ? m.group : null,
-    links: Array.isArray(m.links) ? [...new Set(m.links.filter(Number.isInteger))] : [],
+    links: readLinks(m.links),
     comments: issue.comments,
   };
 }
@@ -167,7 +186,7 @@ function encodeItem(item) {
     meta.y = finite(item.y);
   }
   if (Number.isInteger(item.group)) meta.group = item.group;
-  if (item.links && item.links.length) meta.links = item.links;
+  if (item.links && item.links.length) meta.links = writeLinks(item.links);
   return { title: item.title, body: encodeBody(meta, item.text) };
 }
 
@@ -340,14 +359,26 @@ export class Store {
     return this.removeItem(number);
   }
 
-  addLink(from, to) {
-    return this.patchItem(from, (idea) => (idea.links.includes(to) ? null : { links: [...idea.links, to] }));
+  addLink(from, to, color = 'default') {
+    return this.patchItem(from, (idea) => (
+      idea.links.some((link) => link.to === to) ? null : { links: [...idea.links, { to, color }] }));
   }
 
   // A line may have been drawn from either end, so both ends are checked.
   async removeLink(a, b) {
-    await this.patchItem(a, (idea) => (idea.links.includes(b) ? { links: idea.links.filter((n) => n !== b) } : null));
-    await this.patchItem(b, (idea) => (idea.links.includes(a) ? { links: idea.links.filter((n) => n !== a) } : null));
+    const without = (other) => (idea) => (
+      idea.links.some((link) => link.to === other) ? { links: idea.links.filter((link) => link.to !== other) } : null);
+    await this.patchItem(a, without(b));
+    await this.patchItem(b, without(a));
+  }
+
+  async setLinkColor(a, b, color) {
+    const recolour = (other) => (idea) => (
+      idea.links.some((link) => link.to === other)
+        ? { links: idea.links.map((link) => (link.to === other ? { ...link, color } : link)) }
+        : null);
+    await this.patchItem(a, recolour(b));
+    await this.patchItem(b, recolour(a));
   }
 
   setGroup(number, group) {
