@@ -6,8 +6,7 @@
 // All user-written text reaches the page through textContent (the h() helper
 // appends strings as text nodes). Nothing here ever assigns innerHTML.
 
-import { open as openVault } from './vault.js';
-import { Store, COLORS, GROUP_COLORS, PENS, STRING_COLORS, cleanName, withAccessNames } from './store.js';
+import { Store, account, COLORS, GROUP_COLORS, PENS, STRING_COLORS, cleanName } from './store.js';
 import { renderView, buildNotesPdf } from './exporter.js';
 import { Live } from './live.js';
 
@@ -20,15 +19,11 @@ const KEYS = {
   pen: 'idea-board:pen',
   string: 'idea-board:string',
 };
-// GitHub is still checked as the record: every 30 s while live updates are
-// flowing, every 5 s when they aren't. Everyone shares one GitHub key and
-// its hourly request limit, so with many people on the board the slow
-// check matters; the relay carries the changes in between.
+// The server is still checked as the record: every 30 s while live updates
+// are flowing, every 5 s when they aren't. The live connection carries the
+// changes in between.
 const POLL = { live: 30000, fallback: 5000, tabs: 60000, comments: 10000 };
 const PRESENCE = { every: 20000, expire: 50000 };
-// A saved access list reaches the board by a redeploy (about a minute). The
-// People panel checks for it this often, and gives up after this long.
-const REDEPLOY = { every: 10000, giveUp: 360000 };
 
 // Every tab's board is this big, in board pixels, and nothing can leave it.
 const BOARD = { width: 3200, height: 2000 };
@@ -40,7 +35,7 @@ const SLOT = { width: 250, height: 230 };
 // How far past the board's edge someone can pan, in screen pixels.
 const PAN_SLACK = 80;
 const PEN_WIDTHS = { s: 3, m: 6, l: 12 };
-// GitHub caps an issue body at 65,536 characters; a drawing that grows past
+// The server caps a body at 65,536 characters; a drawing that grows past
 // this carries on in a new one.
 const SKETCH_LIMIT = 60000;
 const DOUBLE_TAP = { ms: 400, px: 24 };
@@ -48,10 +43,9 @@ const THEMES = ['auto', 'cork', 'whiteboard', 'chalk', 'night'];
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const state = {
-  vault: null,
-  session: null, // { name, member, admin, vaultId }
+  session: null, // { token, name, adminName, admin }
   store: null,
-  admin: null, // a Store holding the admin key, once unlocked
+  admin: null, // the Store, while admin tools are on
   people: freshPeople(), // the admin's People panel
   loaded: false,
   tabs: [], // the boards this person can see
@@ -214,7 +208,7 @@ function sameName(a, b) {
 }
 
 function isAdminName() {
-  return Boolean(state.session && state.session.member.admin && sameName(state.session.name, state.session.member.admin));
+  return Boolean(state.session && state.session.adminName && sameName(state.session.name, state.session.adminName));
 }
 
 function canChange(author) {
@@ -248,15 +242,6 @@ function isPrivateBoard(id) {
   return Boolean(board && board.visibility === 'private');
 }
 
-// What the relay may carry about an item: nothing on a private board goes to
-// other people's browsers. A board itself is always relayed (only its name
-// and settings), so one made private or deleted leaves everyone's list at once.
-function shareable(item) {
-  if (!item) return true;
-  if (item.kind === 'board') return true;
-  return !isPrivateBoard(item.tab);
-}
-
 function personalBoardId(name) {
   return `me-${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'board'}`;
 }
@@ -284,7 +269,7 @@ function computeBoards() {
   for (const board of [...state.boardItems].sort((a, b) => a.number - b.number)) {
     if (!fromIssues.has(board.id)) fromIssues.set(board.id, board); // a duplicate made in a race: oldest wins
   }
-  const adminName = state.session ? state.session.member.admin : null;
+  const adminName = state.session ? state.session.adminName : null;
   const legacy = state.legacyTabs
     .filter((tab) => !fromIssues.has(tab.id))
     .map((tab, index) => ({ id: tab.id, name: tab.name, owner: adminName, visibility: 'public', personal: false, legacy: true, order: index }));
@@ -397,41 +382,50 @@ async function boot() {
   const string = readStorage('localStorage', KEYS.string);
   if (STRING_COLORS.includes(string)) state.stringColor = string;
   wire();
+  let needed;
   try {
-    const res = await fetch('vault.json', { cache: 'no-cache' });
-    if (!res.ok) throw new Error('vault');
-    state.vault = await res.json();
+    needed = await account.setupNeeded();
   } catch {
     showSignin('unavailable');
     return;
   }
-  if (state.vault.pending) {
-    showSignin('pending');
+  if (needed) {
+    showSignin('setup');
     return;
   }
-  // A rebuild re-seals the vault with a new salt. Forcing a fresh sign-in then
-  // is what makes a name removed from the access list take effect.
+  // A saved session is checked with the server: it may have ended since
+  // (signed out elsewhere, removed from the list, a new team password).
   const saved = readStorage('sessionStorage', KEYS.session);
-  if (saved && saved.member && saved.vaultId === state.vault.member.salt) {
-    startBoard(saved);
-    return;
+  if (saved && saved.token) {
+    try {
+      const current = await account.check(saved.token);
+      startBoard({ ...saved, ...current });
+      return;
+    } catch (error) {
+      if (error.status !== 401) {
+        showSignin('unavailable');
+        return;
+      }
+    }
   }
   writeStorage('sessionStorage', KEYS.session, null);
   showSignin('ready');
 }
 
-function showSignin(mode) {
+function showSignin(mode, message = '') {
   $('app').hidden = true;
   $('signin').hidden = false;
   $('signin-form').hidden = mode !== 'ready';
+  $('setup-form').hidden = mode !== 'setup';
+  const notes = {
+    unavailable: "The board couldn't reach its server. Refresh the page to try again.",
+    setup: 'This board is new. Set it up with the setup code you were given.',
+  };
   const note = $('signin-note');
-  note.hidden = mode === 'ready';
-  if (mode === 'pending') {
-    note.textContent = "This board is almost ready. Its access keys haven't been added yet, so nobody can sign in.";
-  } else if (mode === 'unavailable') {
-    note.textContent = "The board couldn't load its settings. Refresh the page to try again.";
-  }
+  note.textContent = message || notes[mode] || '';
+  note.hidden = !note.textContent;
   if (mode === 'ready') $('signin-name').focus();
+  if (mode === 'setup') $('setup-code').focus();
 }
 
 async function signIn(event) {
@@ -444,24 +438,47 @@ async function signIn(event) {
     return;
   }
   await busy($('signin-submit'), 'Checking...', async () => {
-    const member = await openVault(password, state.vault.member);
-    if (!member) {
-      showError('signin-error', "That password isn't right. Check it with whoever runs the board.");
-      return;
-    }
-    const match = member.names.find((n) => sameName(n, name));
-    if (!match) {
-      showError('signin-error', `${name} isn't on this board's access list. Ask whoever runs the board to add you.`);
+    let result;
+    try {
+      result = await account.signIn(name, password);
+    } catch (error) {
+      showError('signin-error', error.message);
       return;
     }
     $('signin-password').value = '';
-    const session = { name: match, member, admin: null, vaultId: state.vault.member.salt };
+    const session = { token: result.token, name: result.name, adminName: result.adminName, admin: false };
     writeStorage('sessionStorage', KEYS.session, session);
     startBoard(session);
   });
 }
 
-function signOut() {
+// The first visit to a new board: the setup code proves it's whoever was
+// given it, and sets the admin and the two passwords.
+async function setUp(event) {
+  event.preventDefault();
+  $('setup-error').hidden = true;
+  const fields = {
+    code: $('setup-code').value.trim(),
+    adminName: $('setup-name').value,
+    adminPassword: $('setup-admin-password').value,
+    teamPassword: $('setup-team-password').value,
+  };
+  await busy($('setup-submit'), 'Setting up...', async () => {
+    try {
+      await account.setup(fields);
+    } catch (error) {
+      showError('setup-error', error.message);
+      return;
+    }
+    $('setup-form').reset();
+    showSignin('ready', 'The board is ready. Sign in with your first name and the team password.');
+  });
+}
+
+// `message` says why, when it wasn't the person's own choice.
+function signOut(message = '') {
+  if (!state.session) return;
+  if (state.session.token) account.signOut(state.session.token).catch(() => {});
   if (state.mode !== 'move') setMode('move');
   stopLive();
   stopPolling();
@@ -471,7 +488,7 @@ function signOut() {
   setItems([]);
   state.session = null;
   history.replaceState(null, '', location.pathname);
-  showSignin('ready');
+  showSignin('ready', message);
 }
 
 function saveSession() {
@@ -482,8 +499,9 @@ function saveSession() {
 
 async function startBoard(session) {
   state.session = session;
-  state.store = new Store(session.member);
-  state.admin = session.admin ? new Store(session.admin) : null;
+  state.store = new Store({ token: session.token });
+  state.store.onSignedOut = () => signOut("You've been signed out. Sign in again to carry on.");
+  state.admin = session.admin ? state.store : null;
   $('signin').hidden = true;
   $('app').hidden = false;
   setRail(readStorage('localStorage', KEYS.rail) === 'collapsed');
@@ -602,19 +620,9 @@ function stopPolling() {
 
 function startLive() {
   stopLive();
-  const { member } = state.session;
-  // Nothing on a private board is relayed: other people's browsers never get it.
-  state.store.onChange = (number, item) => {
-    if (shareable(item || findItem(number))) announce({ t: 'item', number, item });
-  };
-  state.store.onComment = (number, id, comment) => {
-    if (shareable(findItem(number))) announce({ t: 'comment', number, id, comment });
-  };
-  state.live = new Live({
-    secret: `${member.repo}|${member.token}`,
-    onMessage: onLive,
-    onStatus: setLiveStatus,
-  });
+  // Saved changes reach everyone from the server; this connection hears them
+  // and carries what isn't saved (presence, drags, pen strokes).
+  state.live = new Live({ token: state.session.token, onMessage: onLive, onStatus: setLiveStatus });
   state.live.start().catch(() => setLiveStatus('offline'));
   state.liveTimers = [
     setInterval(() => sayHello(false), PRESENCE.every),
@@ -665,8 +673,8 @@ function sayHello(ask) {
   if (state.live && state.session) announce({ t: 'hello', name: state.session.name, tab: where, ask });
 }
 
-// After somebody else's change, check GitHub a little later: it confirms the
-// change and picks up anything a relay message can't carry (comment counts).
+// After somebody else's change, check the server a little later: it confirms
+// the change and picks up anything a live message didn't carry.
 function reconcileSoon(delay = 6000) {
   clearTimeout(state.reconcileTimer);
   state.reconcileTimer = setTimeout(() => {
@@ -760,12 +768,14 @@ function onLive(message) {
           renderComments();
         }
       }
-      // The note's comment count comes from GitHub; pick it up shortly.
       reconcileSoon(10000);
       break;
     }
     case 'refresh':
       reconcileSoon(1500);
+      break;
+    case 'signed-out':
+      signOut("You've been signed out. Sign in again to carry on.");
       break;
     case 'hello':
       if (!from) return;
@@ -2615,8 +2625,9 @@ async function removeComment(comment) {
 
 function openAdminDialog() {
   if (state.admin) {
+    account.lockAdmin(state.session.token).catch(() => {});
     state.admin = null;
-    state.session.admin = null;
+    state.session.admin = false;
     saveSession();
     renderAll();
     if (state.detail != null) renderDetail();
@@ -2633,14 +2644,15 @@ async function unlockAdmin(event) {
   event.preventDefault();
   $('admin-error').hidden = true;
   await busy($('admin-submit'), 'Checking...', async () => {
-    const payload = await openVault($('admin-password').value, state.vault.admin);
-    if (!payload) {
-      showError('admin-error', "That admin password isn't right.");
+    try {
+      await account.unlockAdmin(state.session.token, $('admin-password').value);
+    } catch (error) {
+      showError('admin-error', error.message);
       return;
     }
     $('admin-password').value = '';
-    state.session.admin = payload;
-    state.admin = new Store(payload);
+    state.session.admin = true;
+    state.admin = state.store;
     saveSession();
     $('admin-dialog').close();
     renderAll();
@@ -2650,65 +2662,41 @@ async function unlockAdmin(event) {
 
 // ---------------------------------------------------------------- people
 
-// Who can sign in is ACCESS.md in the data repository. The admin's People
-// panel commits it with the admin key; the data repository's workflow then
-// copies the names into the board's ALLOWED_NAMES secret and redeploys.
-//
-// Changes not saved yet are kept as names to add and to remove, not as a
-// copy of the file: closing the panel loses nothing, and a save applies them
-// to the file as GitHub has it at that moment, keeping any edit made there.
+// Who can sign in, kept by the server. The panel collects names to add and
+// to remove, and Save sends just those, so it never undoes a change made in
+// another window. A save takes effect at once: removed people are signed out
+// wherever they have the board open.
 
 function freshPeople() {
-  return { file: null, added: [], removed: [], loading: false };
+  return { names: null, added: [], removed: [], loading: false };
 }
 
 function includesName(list, name) {
   return list.some((other) => sameName(other, name));
 }
 
-// The list once saved. The admin always stays on it: the build would put
-// them back anyway.
-function peopleAfter(names, { added, removed }) {
-  const after = names.filter((name) => !includesName(removed, name));
-  for (const name of added) if (!includesName(after, name)) after.push(name);
-  const admin = state.session.member.admin;
-  if (admin && !includesName(after, admin)) after.unshift(admin);
-  return after;
-}
-
-function accessMessage(added, removed) {
-  if (!removed.length) return `Add ${andList(added)} to the access list`;
-  if (!added.length) return `Remove ${andList(removed)} from the access list`;
-  return `Update the access list: add ${andList(added)}, remove ${andList(removed)}`;
-}
-
-function accessProblem(error, saving) {
-  if (saving && (error.status === 403 || error.status === 404)) {
-    return "The admin key isn't allowed to change ACCESS.md. Its token needs Contents: read and write on the data repository.";
-  }
-  if (error.status === 403 || error.status === 404) {
-    return "ACCESS.md couldn't be read from the data repository. The admin key may not cover it.";
-  }
-  return error.message;
+function adminName() {
+  return state.session.adminName || '';
 }
 
 async function openPeople() {
   if (!state.admin) return;
-  $('people-error').hidden = true;
+  for (const id of ['people-error', 'people-status', 'team-password-error']) $(id).hidden = true;
   $('people-name').value = '';
+  $('team-password-new').value = '';
   $('people-dialog').showModal();
   $('people-name').focus();
   const people = state.people;
   people.loading = true;
   renderPeople();
   try {
-    const file = await state.admin.getAccess();
-    people.file = file;
-    // Somebody may have made the same change on GitHub in the meantime.
-    people.added = people.added.filter((name) => !includesName(file.names, name));
-    people.removed = people.removed.filter((name) => includesName(file.names, name));
+    const { names } = await state.store.getPeople();
+    people.names = names;
+    // The same change may have been made in another window meanwhile.
+    people.added = people.added.filter((name) => !includesName(names, name));
+    people.removed = people.removed.filter((name) => includesName(names, name));
   } catch (error) {
-    showError('people-error', accessProblem(error, false));
+    showError('people-error', error.message);
   } finally {
     people.loading = false;
     renderPeople();
@@ -2731,28 +2719,30 @@ function personRow(name, status) {
 
 function renderPeople() {
   if (!state.session) return;
-  const { file, added, removed, loading } = state.people;
-  const admin = state.session.member.admin;
-  if (!file) {
+  const { names, added, removed, loading } = state.people;
+  const admin = adminName();
+  const missingAdmin = Boolean(names && admin && !includesName(names, admin));
+  if (!names) {
     $('people-list').replaceChildren(h('li', { class: 'person person--empty' }, loading ? 'Loading...' : "The list couldn't be loaded."));
   } else {
     const status = (name) => (sameName(name, admin) ? 'admin' : includesName(removed, name) ? 'removed' : 'kept');
     $('people-list').replaceChildren(
-      ...(admin && !includesName(file.names, admin) ? [personRow(admin, 'admin')] : []),
-      ...file.names.map((name) => personRow(name, status(name))),
+      ...(missingAdmin ? [personRow(admin, 'admin')] : []),
+      ...names.map((name) => personRow(name, status(name))),
       ...added.map((name) => personRow(name, 'added')),
     );
   }
-  $('people-count').textContent = file ? String(peopleAfter(file.names, state.people).length) : '';
+  const count = names ? names.length - removed.length + added.length + (missingAdmin ? 1 : 0) : 0;
+  $('people-count').textContent = names ? String(count) : '';
   const changes = [];
   if (added.length) changes.push(`Adding ${andList(added)}`);
   if (removed.length) changes.push(`Removing ${andList(removed)}`);
   $('people-summary').textContent = changes.join(' · ');
-  $('people-save').disabled = !file || !changes.length;
+  $('people-save').disabled = !names || !changes.length;
   $('people-discard').hidden = !changes.length;
   $('people-removal-note').hidden = !removed.length;
-  $('people-name').disabled = !file;
-  $('people-add').disabled = !file;
+  $('people-name').disabled = !names;
+  $('people-add').disabled = !names;
 }
 
 function addPerson(event) {
@@ -2760,7 +2750,7 @@ function addPerson(event) {
   $('people-error').hidden = true;
   const people = state.people;
   const typed = $('people-name').value;
-  if (!typed.trim() || !people.file) return;
+  if (!typed.trim() || !people.names) return;
   const name = cleanName(typed);
   if (!name) {
     showError('people-error', 'Use a first name of up to 40 letters. Spaces, full stops, apostrophes and hyphens are fine, as in Sam K.');
@@ -2769,7 +2759,7 @@ function addPerson(event) {
   if (includesName(people.removed, name)) {
     // Taking back a removal, not adding them twice.
     people.removed = people.removed.filter((other) => !sameName(other, name));
-  } else if (includesName([...people.file.names, ...people.added, state.session.member.admin || ''], name)) {
+  } else if (includesName([...people.names, ...people.added, adminName()], name)) {
     showError('people-error', `${name} is already on the list. If two people share a first name, add each with an initial, like Sam K. and Sam R.`);
     return;
   } else {
@@ -2799,80 +2789,58 @@ function discardPeople() {
   renderPeople();
 }
 
-// Reads the file fresh and commits it with the panel's changes applied.
-async function commitPeople() {
-  const file = await state.admin.getAccess();
-  const names = peopleAfter(file.names, state.people);
-  const added = names.filter((name) => !includesName(file.names, name));
-  const removed = file.names.filter((name) => !includesName(names, name));
-  if (!added.length && !removed.length) return { file, changed: false };
-  const saved = await state.admin.saveAccess(withAccessNames(file.text, names), file.sha, accessMessage(added, removed));
-  return { file: saved, changed: true };
-}
-
 async function savePeople() {
+  const people = state.people;
+  const { added, removed } = people;
   $('people-error').hidden = true;
   await busy($('people-save'), 'Saving...', async () => {
-    let result;
     try {
-      try {
-        result = await commitPeople();
-      } catch (error) {
-        // ACCESS.md changed on GitHub mid-save: apply the changes to that.
-        if (error.status !== 409) throw error;
-        result = await commitPeople();
-      }
+      const { names } = await state.store.changePeople(added, removed);
+      Object.assign(people, { names, added: [], removed: [] });
     } catch (error) {
-      showError('people-error', accessProblem(error, true));
+      showError('people-error', error.message);
       return;
     }
-    Object.assign(state.people, { file: result.file, added: [], removed: [] });
-    if (result.changed) watchRedeploy();
-    else setPeopleStatus('Nothing to save: the list on GitHub already says that.');
+    const done = [];
+    if (added.length) done.push(`${andList(added)} can sign in now.`);
+    if (removed.length) done.push(`${andList(removed)} ${removed.length === 1 ? 'has' : 'have'} been signed out and can't sign in.`);
+    setPeopleStatus(`Saved. ${done.join(' ')}`);
   });
   renderPeople();
 }
 
-function setPeopleStatus(message, isError = false) {
-  const el = $('people-status');
-  el.textContent = message;
-  el.classList.toggle('people-status--error', isError);
-  el.hidden = false;
+function setPeopleStatus(message) {
+  $('people-status').textContent = message;
+  $('people-status').hidden = false;
 }
 
-// The redeploy seals a new vault.json, with a new salt. Seeing the salt
-// change is how the panel knows the new list is live. Only the latest
-// save's check reports.
-let redeployWatch = 0;
-async function watchRedeploy() {
-  const watch = ++redeployWatch;
-  const before = state.vault.member.salt;
-  const tell = (message, isError = false) => {
-    setPeopleStatus(message, isError);
-    if (!$('people-dialog').open) toast(message, isError);
-  };
-  setPeopleStatus('Saved. The board is updating with the new list, which takes about a minute.');
-  const started = Date.now();
-  while (Date.now() - started < REDEPLOY.giveUp) {
-    await new Promise((resolve) => { setTimeout(resolve, REDEPLOY.every); });
-    if (watch !== redeployWatch || !state.session) return;
-    let vault = null;
+// Everyone else is signed out and signs back in with the new password: the
+// way to lock out someone who knew the old one.
+async function changeTeamPassword(event) {
+  event.preventDefault();
+  $('team-password-error').hidden = true;
+  const password = $('team-password-new').value;
+  if (password.length < 8) {
+    showError('team-password-error', 'Use at least 8 characters.');
+    return;
+  }
+  const ok = await confirmAction({
+    title: 'Change the team password?',
+    body: 'Everyone else is signed out now and needs the new password to get back in. Tell the team the new one first.',
+    action: 'Change password',
+  });
+  if (!ok) return;
+  await busy($('team-password-submit'), 'Changing...', async () => {
     try {
-      const res = await fetch('vault.json', { cache: 'no-cache' });
-      vault = res.ok ? await res.json() : null;
-    } catch {
-      vault = null;
-    }
-    if (vault && vault.member && vault.member.salt !== before) {
-      // Signing in again from this page now checks the new list.
-      state.vault = vault;
-      tell('The new list is live. Everyone, you included, signs in again the next time they open the board.');
+      await state.store.setTeamPassword(password);
+    } catch (error) {
+      showError('team-password-error', error.message);
       return;
     }
-  }
-  if (watch === redeployWatch && state.session) {
-    tell('The board hasn\'t picked up the new list yet. Check the "Sync access list" run in the data repository\'s Actions tab.', true);
-  }
+    $('team-password-new').value = '';
+    $('team-password').open = false;
+    setPeopleStatus('Team password changed. Everyone else has been signed out and signs in with the new one.');
+  });
 }
 
 // ---------------------------------------------------------------- boards
@@ -2957,7 +2925,7 @@ async function saveBoard(event) {
 }
 
 // Deleting a board takes everything on it with it (closed, not destroyed:
-// the issues can still be reopened on GitHub).
+// the server keeps closed things, so they can be brought back).
 async function deleteBoard() {
   const board = currentTab();
   if (!canDeleteBoard(board)) {
@@ -3040,13 +3008,15 @@ function wire() {
   $('rail-toggle').addEventListener('click', () => setRail(!$('app').classList.contains('rail-collapsed')));
 
   $('signin-form').addEventListener('submit', signIn);
-  $('sign-out').addEventListener('click', signOut);
+  $('sign-out').addEventListener('click', () => signOut());
+  $('setup-form').addEventListener('submit', setUp);
   $('admin-toggle').addEventListener('click', openAdminDialog);
   $('admin-form').addEventListener('submit', unlockAdmin);
   $('people-open').addEventListener('click', openPeople);
   $('people-add-form').addEventListener('submit', addPerson);
   $('people-save').addEventListener('click', savePeople);
   $('people-discard').addEventListener('click', discardPeople);
+  $('team-password-form').addEventListener('submit', changeTeamPassword);
   $('new-idea').addEventListener('click', () => {
     state.newSpot = null;
     openIdeaDialog(null);

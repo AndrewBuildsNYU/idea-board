@@ -828,8 +828,11 @@ dialog::backdrop { background: rgb(12 16 22 / 0.55); }
 .people-add { display: flex; gap: 8px; }
 .people-add input { flex: 1; min-width: 0; }
 .people-status { font-size: 0.9rem; font-weight: 700; color: var(--accent); }
-.people-status--error { color: var(--danger); }
 .people-summary { margin-right: auto; align-self: center; font-size: 0.88rem; color: var(--muted); }
+.people-password { border-top: 1px solid var(--line); padding-top: 14px; }
+.people-password summary { cursor: pointer; font-weight: 700; font-size: 0.92rem; color: var(--muted); }
+.people-password summary:hover { color: var(--ink); }
+.people-password[open] summary { margin-bottom: 14px; color: var(--ink); }
 
 /* ---------- Toast ---------- */
 

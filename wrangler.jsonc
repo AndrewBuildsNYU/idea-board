@@ -1,0 +1,13 @@
+// Cloudflare deploy settings. `npm run deploy` publishes the page and its
+// server together; `npm run dev` runs both on this computer.
+{
+  "name": "fedi-boards",
+  "main": "worker/index.js",
+  "compatibility_date": "2025-06-01",
+  "assets": { "directory": "./site", "binding": "ASSETS" },
+  "durable_objects": {
+    "bindings": [{ "name": "BOARD", "class_name": "Board" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board"] }],
+  "observability": { "enabled": true }
+}

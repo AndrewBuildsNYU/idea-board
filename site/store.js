@@ -1,7 +1,9 @@
-// Everything the board reads and writes, through the GitHub REST API.
+// Everything the board reads and writes, through the board's own server
+// (worker/ in this repository, at /api on the same site).
 //
-// The private data repository is the database. Every thing on a board is an
-// issue, told apart by a "type" in a hidden marker at the top of its body:
+// The server stores things in the shape GitHub issues had, since the board
+// began on GitHub. Every thing on a board is an "issue", told apart by a
+// "type" in a hidden marker at the top of its body:
 //   an idea     (no type)  title = the idea's title, body = its details
 //   a group     "group"    title = the group's name; ideas point at it
 //   board text  "text"     body = the words written on the board
@@ -9,27 +11,23 @@
 //   a board     "board"    title = the board's name; things on it name its id
 //   comments    comments on an idea's issue
 //   removing    closes the issue, so nothing is ever destroyed by the board
-// tabs.json at the repository root holds the boards made before boards were
-// issues. It is only read now; a board issue with the same id overrides one.
-// ACCESS.md at the root lists who can sign in. The admin's People panel
-// edits it with the admin key; the data repository's sync workflow carries
-// it to the board.
+// The server also keeps the boards made before boards were issues (/tabs,
+// read only; a board issue with the same id overrides one) and the list of
+// who can sign in, which the admin's People panel edits.
 // Lines between ideas are stored on the idea they were drawn from (`links`).
 //
-// Who wrote something is a first name in the same marker, because every
-// write goes through one shared key and GitHub would otherwise credit the
-// key's owner.
+// Who wrote something is a first name in the same marker. The server sets it
+// from the signed-in session, so nobody can post as someone else.
 //
-// Lists are fetched with If-None-Match. A 304 does not count against
-// GitHub's rate limit, which is what makes polling a shared key affordable.
+// Lists are fetched with If-None-Match, so a poll that finds nothing new is
+// a tiny 304.
 //
-// GitHub's lists trail its writes by a few seconds (measured: a new issue was
-// missing from both conditional and plain list requests for ~5 s). So every
-// write is also remembered here and laid over the server's answer until the
-// server shows it, or PENDING_MS passes. Without that, a just-pinned idea
-// vanishes on the next poll and reappears a few seconds later.
+// Every write is also remembered here and laid over the server's answer
+// until the server shows it, or PENDING_MS passes. The server shows its own
+// writes at once; this keeps a just-pinned idea from flickering when a poll
+// that started before the write lands after it.
 
-const API = 'https://api.github.com';
+const API = '/api';
 const PENDING_MS = 120000;
 const MARK = 'idea-board:v1';
 const MARK_RE = /^<!-- idea-board:v1 (.*?) -->\r?\n?/s;
@@ -71,35 +69,73 @@ export function parseBody(body) {
   return { meta, text: source.slice(match[0].length).trim() };
 }
 
-function encodeBase64Utf8(text) {
-  let s = '';
-  for (const b of new TextEncoder().encode(text)) s += String.fromCharCode(b);
-  return btoa(s);
+// The server words its own refusals for people (wrong password, not on the
+// list, not yours to change); anything it didn't word gets a general reason.
+function explain(status, detail) {
+  if (detail) return detail;
+  if (status === 401) return "You've been signed out. Sign in again to carry on.";
+  if (status === 403) return "You can't change that.";
+  if (status === 404) return "That isn't on the board any more.";
+  if (status === 429) return 'Too many tries. Wait a few minutes and try again.';
+  return `The board's server had a problem (${status}). Try again in a moment.`;
 }
 
-function decodeBase64Utf8(text) {
-  const s = atob(text.replace(/\s/g, ''));
-  return new TextDecoder().decode(Uint8Array.from(s, (c) => c.charCodeAt(0)));
-}
-
-function nextLink(res) {
-  const link = res.headers.get('Link') || '';
-  const match = link.match(/<([^>]+)>;\s*rel="next"/);
-  return match ? match[1] : null;
-}
-
-function explain(res, detail) {
-  const status = res.status;
-  if (status === 401) {
-    return "GitHub rejected the board's access key. It may have expired. Tell whoever runs the board.";
+// One request to the board's server. `token` is the session's, once signed in.
+export async function call(method, path, { token, body, etag } = {}) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (etag) headers['If-None-Match'] = etag;
+  const init = { method, headers };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  // Lists change all the time; never let the browser answer from its cache.
+  if (IN_BROWSER) init.cache = 'no-store';
+  let res;
+  try {
+    res = await fetch(API + path, init);
+  } catch {
+    throw new ApiError(0, "Can't reach the board. Check your connection; it will keep trying.");
   }
-  if (status === 429 || (status === 403 && res.headers.get('X-RateLimit-Remaining') === '0')) {
-    return 'GitHub is limiting how fast the board can make requests. It will catch up in a few minutes.';
+  if (res.status === 304) return { status: 304, res, data: null };
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = (await res.json()).message || '';
+    } catch {
+      detail = '';
+    }
+    throw new ApiError(res.status, explain(res.status, detail));
   }
-  if (status === 403) return "The board's access key isn't allowed to do that.";
-  if (status === 404) return "The board's data couldn't be found. The access key may not cover the data repository.";
-  return detail ? `GitHub said: ${detail}` : `GitHub returned an error (${status}).`;
+  const data = res.status === 204 ? null : await res.json();
+  return { status: res.status, res, data };
 }
+
+// Signing in and out, before there's a Store to ask.
+export const account = {
+  async setupNeeded() {
+    return (await call('GET', '/setup')).data.needed;
+  },
+  async setup(fields) {
+    await call('POST', '/setup', { body: fields });
+  },
+  // { token, name, adminName }
+  async signIn(name, password) {
+    return (await call('POST', '/session', { body: { name, password } })).data;
+  },
+  // { name, adminName, admin }, or an ApiError with status 401 once it's over.
+  async check(token) {
+    return (await call('GET', '/session', { token })).data;
+  },
+  async signOut(token) {
+    await call('DELETE', '/session', { token });
+  },
+  async unlockAdmin(token, password) {
+    await call('POST', '/session/admin', { token, body: { password } });
+  },
+  async lockAdmin(token) {
+    await call('DELETE', '/session/admin', { token });
+  },
+};
 
 function validTab(tab) {
   return tab && typeof tab.id === 'string' && /^[a-z0-9-]{1,48}$/.test(tab.id) && typeof tab.name === 'string';
@@ -213,41 +249,14 @@ function encodeItem(item) {
   return { title: item.title, body: encodeBody(meta, item.text) };
 }
 
-// A name in ACCESS.md is a bullet line, read the way the sync workflow reads
-// it (any "- " or "* " line, anywhere in the file), so the panel shows
-// exactly the names that reach the board.
-const ACCESS_PATH = 'ACCESS.md';
-const BULLET_RE = /^\s*[-*]\s+(\S.*?)\s*$/;
-
-export function accessNames(text) {
-  const names = [];
-  for (const line of String(text || '').split('\n')) {
-    const match = line.match(BULLET_RE);
-    if (match) names.push(match[1]);
-  }
-  return names;
-}
-
-// A name the list can hold: a first name, perhaps with an initial (Sam K.).
-// No commas, which the build splits names on, and nothing that reads as a
-// bullet. Returns the name tidied, or null.
+// A name the access list can hold: a first name, perhaps with an initial
+// (Sam K.). Used by the page and the server alike. Returns the name tidied,
+// or null.
 const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .'’-]{0,39}$/u;
 
 export function cleanName(text) {
   const name = String(text || '').trim().replace(/\s+/g, ' ');
   return NAME_RE.test(name) ? name : null;
-}
-
-// The file with its list replaced by `names`, put where the first bullet
-// was. The explanation around the list is kept as it is.
-export function withAccessNames(text, names) {
-  const lines = String(text || '').replace(/\s+$/, '').split('\n');
-  const bullets = names.map((name) => `- ${name}`);
-  const first = lines.findIndex((line) => BULLET_RE.test(line));
-  if (first === -1) return `${[...lines, '', ...bullets].join('\n').replace(/^\n+/, '')}\n`;
-  const kept = lines.filter((line) => !BULLET_RE.test(line));
-  kept.splice(first, 0, ...bullets);
-  return `${kept.join('\n')}\n`;
 }
 
 function toComment(comment) {
@@ -261,113 +270,71 @@ function toComment(comment) {
 }
 
 export class Store {
-  constructor({ repo, token }) {
-    this.repo = repo;
+  constructor({ token }) {
     this.token = token;
     this.lists = new Map();
     this.itemCache = { raw: null, items: [] };
     this.itemView = { server: null, version: -1, items: [] };
     this.commentCache = new Map();
-    this.tabCache = { etag: null, value: { tabs: [], sha: null } };
-    this.lastTabWrite = null;
-    this.lastAccessWrite = null;
-    // Writes GitHub's lists may not show yet. A null value means "removed".
+    // Writes the server's lists may not show yet. A null value means "removed".
     this.pendingItems = new Map(); // issue number -> { item | null, at }
     this.pendingComments = new Map(); // issue number -> Map(comment id -> { comment | null, at })
     this.queues = new Map(); // issue number -> the patch in flight
     this.version = 0;
   }
 
-  // Every confirmed write passes through here, so `onChange` (set by the app
-  // to tell everyone else) hears about all of them. `quiet` is for changes
-  // that came from somebody else, which mustn't be echoed back.
-  remember(number, item, { quiet = false } = {}) {
+  // Every confirmed write passes through here. Everyone else hears about it
+  // from the server, which sends each saved change to every open board.
+  remember(number, item) {
     this.pendingItems.set(number, { item, at: Date.now() });
     this.version++;
-    if (!quiet && this.onChange) this.onChange(number, item);
   }
 
-  rememberComment(number, id, comment, { quiet = false } = {}) {
+  rememberComment(number, id, comment) {
     if (!this.pendingComments.has(number)) this.pendingComments.set(number, new Map());
     this.pendingComments.get(number).set(id, { comment, at: Date.now() });
     this.version++;
-    if (!quiet && this.onComment) this.onComment(number, id, comment);
   }
 
-  // Somebody else's write, relayed live. It's held like one of ours until
-  // GitHub shows it, unless what we already have is newer.
+  // Somebody else's write, sent live. It's held like one of ours until the
+  // next list shows it, unless what we already have is newer.
   applyRemote(number, item) {
     const pending = this.pendingItems.get(number);
     const known = pending ? pending.item : this.itemCache.items.find((other) => other.number === number);
     if (item && known && known.updated > item.updated) return false;
-    this.remember(number, item, { quiet: true });
+    this.remember(number, item);
     return true;
   }
 
-  // Tabs the admin just saved, relayed live: shown now, and older copies
-  // GitHub may still be serving are ignored for a while.
-  acceptTabs(tabs, sha) {
-    this.tabCache = { etag: null, value: { tabs, sha } };
-    this.lastTabWrite = { sha, at: Date.now() };
-    return this.tabCache.value;
-  }
-
   // What listComments would return from what we already have, without asking
-  // GitHub; null when this thread has never been loaded.
+  // the server; null when this thread has never been loaded.
   cachedComments(number) {
     return this.commentCache.has(number) ? this.commentsView(number) : null;
   }
 
-  async request(method, path, { body, etag } = {}) {
-    const headers = { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json' };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (etag) headers['If-None-Match'] = etag;
-    const init = { method, headers };
-    if (body !== undefined) init.body = JSON.stringify(body);
-    // GitHub sends max-age=60; without this the browser would serve a
-    // minute-old list and hide everyone's new posts, including our own.
-    if (IN_BROWSER) init.cache = 'no-store';
-    let res;
+  // A 401 means the session is over (signed out elsewhere, removed from the
+  // list, or the team password changed); `onSignedOut` lets the page react.
+  async request(method, path, options = {}) {
     try {
-      res = await fetch(path.startsWith('http') ? path : API + path, init);
-    } catch {
-      throw new ApiError(0, "Can't reach GitHub. Check your connection; the board will keep trying.");
+      return await call(method, path, { ...options, token: this.token });
+    } catch (error) {
+      if (error.status === 401 && this.onSignedOut) this.onSignedOut();
+      throw error;
     }
-    if (res.status === 304) return { status: 304, res, data: null };
-    if (!res.ok) {
-      let detail = '';
-      try {
-        detail = (await res.json()).message || '';
-      } catch {
-        detail = '';
-      }
-      throw new ApiError(res.status, explain(res, detail));
-    }
-    const data = res.status === 204 ? null : await res.json();
-    return { status: res.status, res, data };
   }
 
-  // Every page of a list. Only page 1 is conditional; lists are sorted so
-  // that any change lands on page 1 and changes its ETag.
   async listAll(path) {
     const cached = this.lists.get(path);
-    const first = await this.request('GET', path, { etag: cached && cached.etag });
-    if (first.status === 304 && cached) return cached.items;
-    let items = first.data;
-    let next = nextLink(first.res);
-    while (next) {
-      const page = await this.request('GET', next);
-      items = items.concat(page.data);
-      next = nextLink(page.res);
-    }
-    this.lists.set(path, { etag: first.res.headers.get('ETag'), items });
-    return items;
+    const result = await this.request('GET', path, { etag: cached && cached.etag });
+    if (result.status === 304 && cached) return cached.items;
+    this.lists.set(path, { etag: result.res.headers.get('ETag'), items: result.data });
+    return result.data;
   }
 
   // Everything on every board. Returns the same array object when nothing
   // changed, so callers can skip re-rendering with a plain === check.
   async listItems() {
-    const raw = await this.listAll(`/repos/${this.repo}/issues?state=open&sort=updated&direction=desc&per_page=100`);
+    const raw = await this.listAll('/issues');
     if (raw !== this.itemCache.raw) {
       this.itemCache = { raw, items: raw.filter((issue) => !issue.pull_request).map(toItem) };
     }
@@ -395,7 +362,7 @@ export class Store {
 
   async createItem(item) {
     const { title, body } = encodeItem(item);
-    const { data } = await this.request('POST', `/repos/${this.repo}/issues`, { body: { title, body } });
+    const { data } = await this.request('POST', '/issues', { body: { title, body } });
     const created = toItem(data);
     this.remember(created.number, created);
     return created;
@@ -404,7 +371,7 @@ export class Store {
   // `changes` is any subset of the item's fields; the rest is kept.
   async updateItem(item, changes) {
     const { title, body } = encodeItem({ ...item, ...changes });
-    const { data } = await this.request('PATCH', `/repos/${this.repo}/issues/${item.number}`, { body: { title, body } });
+    const { data } = await this.request('PATCH', `/issues/${item.number}`, { body: { title, body } });
     const updated = toItem(data);
     this.remember(updated.number, updated);
     return updated;
@@ -419,10 +386,10 @@ export class Store {
   // same version, and the second write would undo the first.
   patchItem(number, change) {
     const run = async () => {
-      const { data } = await this.request('GET', `/repos/${this.repo}/issues/${number}`);
+      const { data } = await this.request('GET', `/issues/${number}`);
       const fetched = toItem(data);
-      // With several people editing, a change relayed live can be newer than
-      // what GitHub hands back; build on whichever is newer.
+      // With several people editing, a change sent live can be newer than
+      // what the server handed back; build on whichever is newer.
       const known = this.pendingItems.get(number);
       const item = known && known.item && known.item.updated > fetched.updated ? known.item : fetched;
       const changes = typeof change === 'function' ? change(item) : change;
@@ -436,9 +403,7 @@ export class Store {
   }
 
   async removeItem(number) {
-    await this.request('PATCH', `/repos/${this.repo}/issues/${number}`, {
-      body: { state: 'closed', state_reason: 'not_planned' },
-    });
+    await this.request('PATCH', `/issues/${number}`, { body: { state: 'closed' } });
     this.remember(number, null);
   }
 
@@ -493,7 +458,7 @@ export class Store {
   }
 
   async listComments(number) {
-    const raw = await this.listAll(`/repos/${this.repo}/issues/${number}/comments?per_page=100`);
+    const raw = await this.listAll(`/issues/${number}/comments`);
     const cached = this.commentCache.get(number);
     if (!cached || cached.raw !== raw) {
       this.commentCache.set(number, { raw, comments: raw.map(toComment), view: null, version: -1 });
@@ -528,7 +493,7 @@ export class Store {
   }
 
   async addComment(number, { author, text }) {
-    const { data } = await this.request('POST', `/repos/${this.repo}/issues/${number}/comments`, {
+    const { data } = await this.request('POST', `/issues/${number}/comments`, {
       body: { body: encodeBody({ author }, text) },
     });
     const comment = toComment(data);
@@ -537,78 +502,33 @@ export class Store {
   }
 
   async removeComment(number, id) {
-    await this.request('DELETE', `/repos/${this.repo}/issues/comments/${id}`);
+    await this.request('DELETE', `/comments/${id}`);
     this.rememberComment(number, id, null);
   }
 
-  // `fresh` skips the ETag so an admin edit always starts from the latest sha.
-  async getTabs(fresh = false) {
-    let result;
-    try {
-      result = await this.request('GET', `/repos/${this.repo}/contents/tabs.json`, {
-        etag: fresh ? null : this.tabCache.etag,
-      });
-    } catch (error) {
-      if (error.status === 404) return { tabs: [], sha: null };
-      throw error;
-    }
-    if (result.status === 304) return this.tabCache.value;
-    // Only the admin writes tabs, so a different sha this soon after our own
-    // write is GitHub still serving the old file, not someone else's change.
-    const recent = this.lastTabWrite;
-    if (recent && result.data.sha !== recent.sha && Date.now() - recent.at < PENDING_MS) {
-      return this.tabCache.value;
-    }
-    if (recent && result.data.sha === recent.sha) this.lastTabWrite = null;
-    let tabs = [];
-    try {
-      const parsed = JSON.parse(decodeBase64Utf8(result.data.content));
-      tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter(validTab) : [];
-    } catch {
-      tabs = [];
-    }
-    this.tabCache = { etag: result.res.headers.get('ETag'), value: { tabs, sha: result.data.sha } };
-    return this.tabCache.value;
+  // The boards from before boards were issues: [{ id, name }].
+  async getTabs() {
+    const { data } = await this.request('GET', '/tabs');
+    return { tabs: Array.isArray(data.tabs) ? data.tabs.filter(validTab) : [] };
   }
 
-  async saveTabs(tabs, sha, message) {
-    const body = { message, content: encodeBase64Utf8(`${JSON.stringify({ tabs }, null, 2)}\n`) };
-    if (sha) body.sha = sha;
-    const { data } = await this.request('PUT', `/repos/${this.repo}/contents/tabs.json`, { body });
-    this.tabCache = { etag: null, value: { tabs, sha: data.content.sha } };
-    this.lastTabWrite = { sha: data.content.sha, at: Date.now() };
-    return this.tabCache.value;
+  // Admin only: who can sign in. { names, adminName }
+  async getPeople() {
+    return (await this.request('GET', '/people')).data;
   }
 
-  // Always read fresh, so the panel edits the latest list. Right after our
-  // own save GitHub may still hand back the old file; ours is used then, as
-  // with tabs.json.
-  async getAccess() {
-    const { data } = await this.request('GET', `/repos/${this.repo}/contents/${ACCESS_PATH}`);
-    const recent = this.lastAccessWrite;
-    if (recent && data.sha !== recent.value.sha && Date.now() - recent.at < PENDING_MS) return recent.value;
-    this.lastAccessWrite = null;
-    const text = decodeBase64Utf8(data.content);
-    return { text, sha: data.sha, names: accessNames(text) };
+  // Admin only. Applied on the server in one go, so two admins' changes (or
+  // two windows) never undo each other. Takes effect at once: removed people
+  // are signed out. Returns { names, adminName }.
+  async changePeople(add, remove) {
+    return (await this.request('PATCH', '/people', { body: { add, remove } })).data;
   }
 
-  // `sha` is the version the change was made from. If the file changed on
-  // GitHub since, GitHub refuses with 409 rather than losing that change.
-  async saveAccess(text, sha, message) {
-    let data;
-    try {
-      ({ data } = await this.request('PUT', `/repos/${this.repo}/contents/${ACCESS_PATH}`, {
-        body: { message, content: encodeBase64Utf8(text), sha },
-      }));
-    } catch (error) {
-      if (error.status === 409) this.lastAccessWrite = null;
-      throw error;
-    }
-    const value = { text, sha: data.content.sha, names: accessNames(text) };
-    this.lastAccessWrite = { value, at: Date.now() };
-    return value;
+  // Admin only. Signs everyone else out; they sign in with the new password.
+  async setTeamPassword(password) {
+    return (await this.request('PUT', '/team-password', { body: { password } })).data;
   }
 }
 
-// Exported for scripts/check.mjs.
-export const _internal = { toItem, encodeItem, STROKE_RE };
+// Shared with the server (worker/) and scripts/check.mjs.
+export const _internal = { toItem, encodeItem, toComment, STROKE_RE };

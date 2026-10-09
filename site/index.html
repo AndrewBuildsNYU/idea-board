@@ -35,7 +35,28 @@
         <button id="signin-submit" class="btn btn-primary btn-wide" type="submit">Sign in</button>
       </form>
 
-      <p id="signin-note" class="signin-note">Loading...</p>
+      <form id="setup-form" class="stack" hidden>
+        <div class="field">
+          <label for="setup-code">Setup code</label>
+          <input id="setup-code" type="text" autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label for="setup-name">Your first name <span class="optional">you'll be the admin</span></label>
+          <input id="setup-name" type="text" autocomplete="given-name" autocapitalize="words" spellcheck="false" maxlength="40" required>
+        </div>
+        <div class="field">
+          <label for="setup-team-password">Team password <span class="optional">everyone signs in with this</span></label>
+          <input id="setup-team-password" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+        <div class="field">
+          <label for="setup-admin-password">Admin password <span class="optional">only for you, to turn on admin tools</span></label>
+          <input id="setup-admin-password" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+        <p id="setup-error" class="form-error" role="alert" hidden></p>
+        <button id="setup-submit" class="btn btn-primary btn-wide" type="submit">Set up the board</button>
+      </form>
+
+      <p id="signin-note" class="signin-note" role="status">Loading...</p>
     </div>
   </main>
 
@@ -274,7 +295,7 @@
         <h2 id="people-dialog-title" class="people-title">People <span id="people-count" class="count-pill"></span></h2>
         <button class="btn btn-quiet" type="button" data-close>Close</button>
       </div>
-      <p class="muted">Who can sign in. Saving updates the board in about a minute, and then everyone signs in again.</p>
+      <p class="muted">Who can sign in. Changes take effect as soon as you save.</p>
       <ul id="people-list" class="people-list" aria-label="Who can sign in"></ul>
       <form id="people-add-form" class="people-add">
         <label for="people-name" class="sr-only">First name to add</label>
@@ -282,7 +303,7 @@
         <button id="people-add" class="btn btn-quiet" type="submit">Add</button>
       </form>
       <p class="hint">Spell each name the way it should show on notes. If two people share a first name, add each with an initial, like Sam K. and Sam R.</p>
-      <p id="people-removal-note" class="hint" hidden>Removing someone stops them signing in under that name. Everyone shares the team password, though, so to lock someone out completely, also change the BOARD_PASSWORD and MEMBER_TOKEN secrets.</p>
+      <p id="people-removal-note" class="hint" hidden>Removing someone signs them out at once and stops them signing in under that name. Everyone shares the team password, though, so if they know it, change it below too.</p>
       <p id="people-error" class="form-error" role="alert" hidden></p>
       <p id="people-status" class="people-status" role="status" hidden></p>
       <div class="dialog-actions">
@@ -290,6 +311,20 @@
         <button id="people-discard" class="btn btn-quiet" type="button" hidden>Discard</button>
         <button id="people-save" class="btn btn-primary" type="button" disabled>Save changes</button>
       </div>
+      <details id="team-password" class="people-password">
+        <summary>Change the team password</summary>
+        <form id="team-password-form" class="stack">
+          <div class="field">
+            <label for="team-password-new">New team password</label>
+            <input id="team-password-new" type="password" autocomplete="new-password" minlength="8">
+          </div>
+          <p class="hint">Everyone except you is signed out, and signs back in with the new password.</p>
+          <p id="team-password-error" class="form-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button id="team-password-submit" class="btn btn-quiet" type="submit">Change team password</button>
+          </div>
+        </form>
+      </details>
     </div>
   </dialog>
 
@@ -311,7 +346,7 @@
         </label>
         <label class="choice" for="board-vis-private">
           <input type="radio" name="board-visibility" id="board-vis-private" value="private">
-          <span><strong>Private</strong>Only you will see it. It's hidden from others in the app, not locked: anyone with the team password could still reach it.</span>
+          <span><strong>Private</strong>Only you will see it, not even the admin.</span>
         </label>
       </fieldset>
       <p id="board-visibility-note" class="hint" hidden>Only the person who made this board can change who sees it.</p>
