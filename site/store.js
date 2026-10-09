@@ -11,6 +11,9 @@
 //   removing    closes the issue, so nothing is ever destroyed by the board
 // tabs.json at the repository root holds the boards made before boards were
 // issues. It is only read now; a board issue with the same id overrides one.
+// ACCESS.md at the root lists who can sign in. The admin's People panel
+// edits it with the admin key; the data repository's sync workflow carries
+// it to the board.
 // Lines between ideas are stored on the idea they were drawn from (`links`).
 //
 // Who wrote something is a first name in the same marker, because every
@@ -210,6 +213,43 @@ function encodeItem(item) {
   return { title: item.title, body: encodeBody(meta, item.text) };
 }
 
+// A name in ACCESS.md is a bullet line, read the way the sync workflow reads
+// it (any "- " or "* " line, anywhere in the file), so the panel shows
+// exactly the names that reach the board.
+const ACCESS_PATH = 'ACCESS.md';
+const BULLET_RE = /^\s*[-*]\s+(\S.*?)\s*$/;
+
+export function accessNames(text) {
+  const names = [];
+  for (const line of String(text || '').split('\n')) {
+    const match = line.match(BULLET_RE);
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
+// A name the list can hold: a first name, perhaps with an initial (Sam K.).
+// No commas, which the build splits names on, and nothing that reads as a
+// bullet. Returns the name tidied, or null.
+const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .'’-]{0,39}$/u;
+
+export function cleanName(text) {
+  const name = String(text || '').trim().replace(/\s+/g, ' ');
+  return NAME_RE.test(name) ? name : null;
+}
+
+// The file with its list replaced by `names`, put where the first bullet
+// was. The explanation around the list is kept as it is.
+export function withAccessNames(text, names) {
+  const lines = String(text || '').replace(/\s+$/, '').split('\n');
+  const bullets = names.map((name) => `- ${name}`);
+  const first = lines.findIndex((line) => BULLET_RE.test(line));
+  if (first === -1) return `${[...lines, '', ...bullets].join('\n').replace(/^\n+/, '')}\n`;
+  const kept = lines.filter((line) => !BULLET_RE.test(line));
+  kept.splice(first, 0, ...bullets);
+  return `${kept.join('\n')}\n`;
+}
+
 function toComment(comment) {
   const { meta, text } = parseBody(comment.body);
   return {
@@ -230,6 +270,7 @@ export class Store {
     this.commentCache = new Map();
     this.tabCache = { etag: null, value: { tabs: [], sha: null } };
     this.lastTabWrite = null;
+    this.lastAccessWrite = null;
     // Writes GitHub's lists may not show yet. A null value means "removed".
     this.pendingItems = new Map(); // issue number -> { item | null, at }
     this.pendingComments = new Map(); // issue number -> Map(comment id -> { comment | null, at })
@@ -537,6 +578,35 @@ export class Store {
     this.tabCache = { etag: null, value: { tabs, sha: data.content.sha } };
     this.lastTabWrite = { sha: data.content.sha, at: Date.now() };
     return this.tabCache.value;
+  }
+
+  // Always read fresh, so the panel edits the latest list. Right after our
+  // own save GitHub may still hand back the old file; ours is used then, as
+  // with tabs.json.
+  async getAccess() {
+    const { data } = await this.request('GET', `/repos/${this.repo}/contents/${ACCESS_PATH}`);
+    const recent = this.lastAccessWrite;
+    if (recent && data.sha !== recent.value.sha && Date.now() - recent.at < PENDING_MS) return recent.value;
+    this.lastAccessWrite = null;
+    const text = decodeBase64Utf8(data.content);
+    return { text, sha: data.sha, names: accessNames(text) };
+  }
+
+  // `sha` is the version the change was made from. If the file changed on
+  // GitHub since, GitHub refuses with 409 rather than losing that change.
+  async saveAccess(text, sha, message) {
+    let data;
+    try {
+      ({ data } = await this.request('PUT', `/repos/${this.repo}/contents/${ACCESS_PATH}`, {
+        body: { message, content: encodeBase64Utf8(text), sha },
+      }));
+    } catch (error) {
+      if (error.status === 409) this.lastAccessWrite = null;
+      throw error;
+    }
+    const value = { text, sha: data.content.sha, names: accessNames(text) };
+    this.lastAccessWrite = { value, at: Date.now() };
+    return value;
   }
 }
 

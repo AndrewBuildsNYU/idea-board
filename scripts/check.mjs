@@ -1,10 +1,11 @@
 // Offline checks that run before every deploy: the vault round-trips, a wrong
 // password is refused, the hidden marker survives anything a person can
-// type, and every kind of thing on a board survives a trip through an issue.
+// type, every kind of thing on a board survives a trip through an issue, and
+// the People panel's edits to ACCESS.md read back as the names it meant.
 
 import assert from 'node:assert/strict';
 import { seal, open } from '../site/vault.js';
-import { encodeBody, parseBody, _internal } from '../site/store.js';
+import { encodeBody, parseBody, accessNames, withAccessNames, cleanName, _internal } from '../site/store.js';
 import { parseNames } from './build.mjs';
 
 const { toItem, encodeItem } = _internal;
@@ -70,5 +71,20 @@ const tampered = toItem({ number: 8, title: 'Drawing', body: encodeBody({ type: 
 assert.deepEqual(tampered.strokes, ['ink|6|1,1 2,2']);
 
 assert.deepEqual(parseNames('- Ana\n* ben\n\nAna\n  Cy  Lo  \nDee, Eve'), ['Ana', 'ben', 'Cy Lo', 'Dee', 'Eve']);
+
+// ACCESS.md: names are the bullet lines, as the sync workflow reads them, and
+// a rewrite puts the new list where the old one was and keeps the rest.
+const access = '# Who can sign in\n\nOne name per bullet, like `Sam K.`\n\n- Dan\n* Ryan  \n  - Zoë\n\nA closing note.\n';
+assert.deepEqual(accessNames(access), ['Dan', 'Ryan', 'Zoë']);
+assert.equal(withAccessNames(access, ['Dan', 'Ida']), '# Who can sign in\n\nOne name per bullet, like `Sam K.`\n\n- Dan\n- Ida\n\nA closing note.\n');
+assert.equal(withAccessNames(withAccessNames(access, ['Dan', 'Ida']), ['Dan', 'Ida']), withAccessNames(access, ['Dan', 'Ida']));
+assert.equal(withAccessNames('# Who can sign in\n', ['Ana']), '# Who can sign in\n\n- Ana\n');
+assert.equal(withAccessNames('', ['Ana']), '- Ana\n');
+// What the panel writes, the build reads back as the same people.
+const written = ['Sam K.', "O'Neil", 'Zoë', 'Mary-Kate'];
+assert.deepEqual(parseNames(accessNames(withAccessNames(access, written)).join('\n')), written);
+assert.equal(cleanName('  Sam   K. '), 'Sam K.');
+assert.equal(cleanName('O’Neil'), 'O’Neil');
+for (const bad of ['', '   ', 'Ana, Ben', '- Ana', '* Ana', '<b>Ana</b>', 'a'.repeat(41)]) assert.equal(cleanName(bad), null, bad);
 
 console.log('All checks passed.');

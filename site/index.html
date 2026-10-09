@@ -69,6 +69,7 @@
         </label>
         <div class="rail-actions">
           <button id="admin-toggle" class="rail-btn" type="button" hidden>Admin</button>
+          <button id="people-open" class="rail-btn" type="button" hidden>People</button>
           <button id="sign-out" class="rail-btn" type="button">Sign out</button>
         </div>
       </div>
@@ -255,7 +256,7 @@
         <h2 id="admin-dialog-title">Turn on admin tools</h2>
         <button class="btn btn-quiet" type="button" data-close>Cancel</button>
       </div>
-      <p class="muted">Admin tools let you rename any public board, and remove anyone's idea, text, drawing or comment. Only the person who made a board can delete it, and private boards stay private, even from the admin.</p>
+      <p class="muted">Admin tools let you rename any public board, remove anyone's idea, text, drawing or comment, and choose who can sign in under People. Only the person who made a board can delete it, and private boards stay private, even from the admin.</p>
       <div class="field">
         <label for="admin-password">Admin password</label>
         <input id="admin-password" type="password" autocomplete="off" required>
@@ -265,6 +266,31 @@
         <button id="admin-submit" class="btn btn-primary" type="submit">Turn on</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="people-dialog" aria-labelledby="people-dialog-title">
+    <div class="dialog-body">
+      <div class="dialog-head">
+        <h2 id="people-dialog-title" class="people-title">People <span id="people-count" class="count-pill"></span></h2>
+        <button class="btn btn-quiet" type="button" data-close>Close</button>
+      </div>
+      <p class="muted">Who can sign in. Saving updates the board in about a minute, and then everyone signs in again.</p>
+      <ul id="people-list" class="people-list" aria-label="Who can sign in"></ul>
+      <form id="people-add-form" class="people-add">
+        <label for="people-name" class="sr-only">First name to add</label>
+        <input id="people-name" type="text" maxlength="40" placeholder="First name" autocomplete="off" autocapitalize="words" spellcheck="false">
+        <button id="people-add" class="btn btn-quiet" type="submit">Add</button>
+      </form>
+      <p class="hint">Spell each name the way it should show on notes. If two people share a first name, add each with an initial, like Sam K. and Sam R.</p>
+      <p id="people-removal-note" class="hint" hidden>Removing someone stops them signing in under that name. Everyone shares the team password, though, so to lock someone out completely, also change the BOARD_PASSWORD and MEMBER_TOKEN secrets.</p>
+      <p id="people-error" class="form-error" role="alert" hidden></p>
+      <p id="people-status" class="people-status" role="status" hidden></p>
+      <div class="dialog-actions">
+        <span id="people-summary" class="people-summary"></span>
+        <button id="people-discard" class="btn btn-quiet" type="button" hidden>Discard</button>
+        <button id="people-save" class="btn btn-primary" type="button" disabled>Save changes</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="tab-dialog" aria-labelledby="tab-dialog-title">

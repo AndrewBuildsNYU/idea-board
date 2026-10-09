@@ -1,13 +1,13 @@
 // FEDI Boards' screens: sign in, boards (each a zoomable surface of notes,
 // lines between them, groups, handwritten text and drawings; shared with the
 // team or private to one person), one idea with its comments, and the admin
-// tools for tidying up shared boards.
+// tools for tidying up shared boards and choosing who can sign in.
 //
 // All user-written text reaches the page through textContent (the h() helper
 // appends strings as text nodes). Nothing here ever assigns innerHTML.
 
 import { open as openVault } from './vault.js';
-import { Store, COLORS, GROUP_COLORS, PENS, STRING_COLORS } from './store.js';
+import { Store, COLORS, GROUP_COLORS, PENS, STRING_COLORS, cleanName, withAccessNames } from './store.js';
 import { renderView, buildNotesPdf } from './exporter.js';
 import { Live } from './live.js';
 
@@ -26,6 +26,9 @@ const KEYS = {
 // check matters; the relay carries the changes in between.
 const POLL = { live: 30000, fallback: 5000, tabs: 60000, comments: 10000 };
 const PRESENCE = { every: 20000, expire: 50000 };
+// A saved access list reaches the board by a redeploy (about a minute). The
+// People panel checks for it this often, and gives up after this long.
+const REDEPLOY = { every: 10000, giveUp: 360000 };
 
 // Every tab's board is this big, in board pixels, and nothing can leave it.
 const BOARD = { width: 3200, height: 2000 };
@@ -49,6 +52,7 @@ const state = {
   session: null, // { name, member, admin, vaultId }
   store: null,
   admin: null, // a Store holding the admin key, once unlocked
+  people: freshPeople(), // the admin's People panel
   loaded: false,
   tabs: [], // the boards this person can see
   allBoards: [], // every board, including other people's private ones (never shown)
@@ -154,6 +158,10 @@ function clamp(value, min, max) {
 
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+function andList(items) {
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0] || '';
 }
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
@@ -459,7 +467,7 @@ function signOut() {
   stopPolling();
   closeDialogs();
   writeStorage('sessionStorage', KEYS.session, null);
-  Object.assign(state, { store: null, admin: null, loaded: false, legacyTabs: [], serverItems: null, current: null });
+  Object.assign(state, { store: null, admin: null, people: freshPeople(), loaded: false, legacyTabs: [], serverItems: null, current: null });
   setItems([]);
   state.session = null;
   history.replaceState(null, '', location.pathname);
@@ -875,6 +883,7 @@ function renderWho() {
   toggle.hidden = !isAdminName();
   toggle.textContent = state.admin ? 'Admin on' : 'Admin';
   toggle.setAttribute('aria-pressed', state.admin ? 'true' : 'false');
+  $('people-open').hidden = !state.admin;
 }
 
 function renderTabs() {
@@ -2639,6 +2648,233 @@ async function unlockAdmin(event) {
   });
 }
 
+// ---------------------------------------------------------------- people
+
+// Who can sign in is ACCESS.md in the data repository. The admin's People
+// panel commits it with the admin key; the data repository's workflow then
+// copies the names into the board's ALLOWED_NAMES secret and redeploys.
+//
+// Changes not saved yet are kept as names to add and to remove, not as a
+// copy of the file: closing the panel loses nothing, and a save applies them
+// to the file as GitHub has it at that moment, keeping any edit made there.
+
+function freshPeople() {
+  return { file: null, added: [], removed: [], loading: false };
+}
+
+function includesName(list, name) {
+  return list.some((other) => sameName(other, name));
+}
+
+// The list once saved. The admin always stays on it: the build would put
+// them back anyway.
+function peopleAfter(names, { added, removed }) {
+  const after = names.filter((name) => !includesName(removed, name));
+  for (const name of added) if (!includesName(after, name)) after.push(name);
+  const admin = state.session.member.admin;
+  if (admin && !includesName(after, admin)) after.unshift(admin);
+  return after;
+}
+
+function accessMessage(added, removed) {
+  if (!removed.length) return `Add ${andList(added)} to the access list`;
+  if (!added.length) return `Remove ${andList(removed)} from the access list`;
+  return `Update the access list: add ${andList(added)}, remove ${andList(removed)}`;
+}
+
+function accessProblem(error, saving) {
+  if (saving && (error.status === 403 || error.status === 404)) {
+    return "The admin key isn't allowed to change ACCESS.md. Its token needs Contents: read and write on the data repository.";
+  }
+  if (error.status === 403 || error.status === 404) {
+    return "ACCESS.md couldn't be read from the data repository. The admin key may not cover it.";
+  }
+  return error.message;
+}
+
+async function openPeople() {
+  if (!state.admin) return;
+  $('people-error').hidden = true;
+  $('people-name').value = '';
+  $('people-dialog').showModal();
+  $('people-name').focus();
+  const people = state.people;
+  people.loading = true;
+  renderPeople();
+  try {
+    const file = await state.admin.getAccess();
+    people.file = file;
+    // Somebody may have made the same change on GitHub in the meantime.
+    people.added = people.added.filter((name) => !includesName(file.names, name));
+    people.removed = people.removed.filter((name) => includesName(file.names, name));
+  } catch (error) {
+    showError('people-error', accessProblem(error, false));
+  } finally {
+    people.loading = false;
+    renderPeople();
+  }
+}
+
+function personRow(name, status) {
+  const tag = { admin: 'Admin', added: 'New', removed: 'Removing' }[status];
+  let action = null;
+  if (status === 'removed') {
+    action = h('button', { type: 'button', class: 'link-btn link-btn--undo', 'aria-label': `Keep ${name}`, onclick: () => keepPerson(name) }, 'Undo');
+  } else if (status !== 'admin') {
+    action = h('button', { type: 'button', class: 'link-btn', 'aria-label': `Remove ${name}`, onclick: () => removePerson(name) }, 'Remove');
+  }
+  return h('li', { class: `person person--${status}` },
+    h('span', { class: 'person-name' }, name),
+    tag ? h('span', { class: `person-tag person-tag--${status}` }, tag) : null,
+    action);
+}
+
+function renderPeople() {
+  if (!state.session) return;
+  const { file, added, removed, loading } = state.people;
+  const admin = state.session.member.admin;
+  if (!file) {
+    $('people-list').replaceChildren(h('li', { class: 'person person--empty' }, loading ? 'Loading...' : "The list couldn't be loaded."));
+  } else {
+    const status = (name) => (sameName(name, admin) ? 'admin' : includesName(removed, name) ? 'removed' : 'kept');
+    $('people-list').replaceChildren(
+      ...(admin && !includesName(file.names, admin) ? [personRow(admin, 'admin')] : []),
+      ...file.names.map((name) => personRow(name, status(name))),
+      ...added.map((name) => personRow(name, 'added')),
+    );
+  }
+  $('people-count').textContent = file ? String(peopleAfter(file.names, state.people).length) : '';
+  const changes = [];
+  if (added.length) changes.push(`Adding ${andList(added)}`);
+  if (removed.length) changes.push(`Removing ${andList(removed)}`);
+  $('people-summary').textContent = changes.join(' · ');
+  $('people-save').disabled = !file || !changes.length;
+  $('people-discard').hidden = !changes.length;
+  $('people-removal-note').hidden = !removed.length;
+  $('people-name').disabled = !file;
+  $('people-add').disabled = !file;
+}
+
+function addPerson(event) {
+  event.preventDefault();
+  $('people-error').hidden = true;
+  const people = state.people;
+  const typed = $('people-name').value;
+  if (!typed.trim() || !people.file) return;
+  const name = cleanName(typed);
+  if (!name) {
+    showError('people-error', 'Use a first name of up to 40 letters. Spaces, full stops, apostrophes and hyphens are fine, as in Sam K.');
+    return;
+  }
+  if (includesName(people.removed, name)) {
+    // Taking back a removal, not adding them twice.
+    people.removed = people.removed.filter((other) => !sameName(other, name));
+  } else if (includesName([...people.file.names, ...people.added, state.session.member.admin || ''], name)) {
+    showError('people-error', `${name} is already on the list. If two people share a first name, add each with an initial, like Sam K. and Sam R.`);
+    return;
+  } else {
+    people.added.push(name);
+  }
+  $('people-name').value = '';
+  renderPeople();
+  $('people-name').focus();
+}
+
+function removePerson(name) {
+  const people = state.people;
+  if (includesName(people.added, name)) people.added = people.added.filter((other) => !sameName(other, name));
+  else people.removed.push(name);
+  $('people-error').hidden = true;
+  renderPeople();
+}
+
+function keepPerson(name) {
+  state.people.removed = state.people.removed.filter((other) => !sameName(other, name));
+  renderPeople();
+}
+
+function discardPeople() {
+  Object.assign(state.people, { added: [], removed: [] });
+  $('people-error').hidden = true;
+  renderPeople();
+}
+
+// Reads the file fresh and commits it with the panel's changes applied.
+async function commitPeople() {
+  const file = await state.admin.getAccess();
+  const names = peopleAfter(file.names, state.people);
+  const added = names.filter((name) => !includesName(file.names, name));
+  const removed = file.names.filter((name) => !includesName(names, name));
+  if (!added.length && !removed.length) return { file, changed: false };
+  const saved = await state.admin.saveAccess(withAccessNames(file.text, names), file.sha, accessMessage(added, removed));
+  return { file: saved, changed: true };
+}
+
+async function savePeople() {
+  $('people-error').hidden = true;
+  await busy($('people-save'), 'Saving...', async () => {
+    let result;
+    try {
+      try {
+        result = await commitPeople();
+      } catch (error) {
+        // ACCESS.md changed on GitHub mid-save: apply the changes to that.
+        if (error.status !== 409) throw error;
+        result = await commitPeople();
+      }
+    } catch (error) {
+      showError('people-error', accessProblem(error, true));
+      return;
+    }
+    Object.assign(state.people, { file: result.file, added: [], removed: [] });
+    if (result.changed) watchRedeploy();
+    else setPeopleStatus('Nothing to save: the list on GitHub already says that.');
+  });
+  renderPeople();
+}
+
+function setPeopleStatus(message, isError = false) {
+  const el = $('people-status');
+  el.textContent = message;
+  el.classList.toggle('people-status--error', isError);
+  el.hidden = false;
+}
+
+// The redeploy seals a new vault.json, with a new salt. Seeing the salt
+// change is how the panel knows the new list is live. Only the latest
+// save's check reports.
+let redeployWatch = 0;
+async function watchRedeploy() {
+  const watch = ++redeployWatch;
+  const before = state.vault.member.salt;
+  const tell = (message, isError = false) => {
+    setPeopleStatus(message, isError);
+    if (!$('people-dialog').open) toast(message, isError);
+  };
+  setPeopleStatus('Saved. The board is updating with the new list, which takes about a minute.');
+  const started = Date.now();
+  while (Date.now() - started < REDEPLOY.giveUp) {
+    await new Promise((resolve) => { setTimeout(resolve, REDEPLOY.every); });
+    if (watch !== redeployWatch || !state.session) return;
+    let vault = null;
+    try {
+      const res = await fetch('vault.json', { cache: 'no-cache' });
+      vault = res.ok ? await res.json() : null;
+    } catch {
+      vault = null;
+    }
+    if (vault && vault.member && vault.member.salt !== before) {
+      // Signing in again from this page now checks the new list.
+      state.vault = vault;
+      tell('The new list is live. Everyone, you included, signs in again the next time they open the board.');
+      return;
+    }
+  }
+  if (watch === redeployWatch && state.session) {
+    tell('The board hasn\'t picked up the new list yet. Check the "Sync access list" run in the data repository\'s Actions tab.', true);
+  }
+}
+
 // ---------------------------------------------------------------- boards
 
 function makeBoardId() {
@@ -2653,7 +2889,7 @@ function describeContents(items) {
     [count('sketch'), 'drawing'],
     [count('group'), 'group'],
   ].filter(([n]) => n).map(([n, one, many]) => `${n} ${n === 1 ? one : many || `${one}s`}`);
-  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || 'nothing';
+  return andList(parts) || 'nothing';
 }
 
 // One dialog for a new board and for an existing board's settings. Only the
@@ -2807,6 +3043,10 @@ function wire() {
   $('sign-out').addEventListener('click', signOut);
   $('admin-toggle').addEventListener('click', openAdminDialog);
   $('admin-form').addEventListener('submit', unlockAdmin);
+  $('people-open').addEventListener('click', openPeople);
+  $('people-add-form').addEventListener('submit', addPerson);
+  $('people-save').addEventListener('click', savePeople);
+  $('people-discard').addEventListener('click', discardPeople);
   $('new-idea').addEventListener('click', () => {
     state.newSpot = null;
     openIdeaDialog(null);

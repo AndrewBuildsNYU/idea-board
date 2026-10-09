@@ -803,6 +803,34 @@ dialog::backdrop { background: rgb(12 16 22 / 0.55); }
 .comment-form { display: flex; flex-direction: column; gap: 8px; }
 .comment-form-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
+/* ---------- People (admin) ---------- */
+
+.people-title { display: flex; align-items: center; gap: 8px; }
+.people-list {
+  list-style: none; margin: 0; padding: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  max-height: min(40dvh, 340px); overflow-y: auto;
+}
+.person { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 6px 12px; }
+.person + .person { border-top: 1px solid var(--line); }
+.person-name { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.person--removed .person-name { color: var(--muted); font-weight: 400; text-decoration: line-through; }
+.person--empty { color: var(--muted); }
+.person-tag {
+  flex: none; padding: 1px 8px; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  background: var(--field); color: var(--muted);
+}
+.person-tag--added { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); color: var(--accent); }
+.person-tag--removed { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); }
+.person .link-btn { flex: none; margin-left: auto; }
+.person .link-btn--undo:hover { color: var(--accent); }
+.people-add { display: flex; gap: 8px; }
+.people-add input { flex: 1; min-width: 0; }
+.people-status { font-size: 0.9rem; font-weight: 700; color: var(--accent); }
+.people-status--error { color: var(--danger); }
+.people-summary { margin-right: auto; align-self: center; font-size: 0.88rem; color: var(--muted); }
+
 /* ---------- Toast ---------- */
 
 .toast {
